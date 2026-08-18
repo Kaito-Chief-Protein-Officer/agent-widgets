@@ -1,0 +1,20 @@
+# Credentials — never commit
+garth/
+
+# Runtime state / caches
+cache.json
+garmin.json
+lock.json
+models-index.json
+panel.log
+panel.json
+
+# Build output
+agent-widgets
+
+# Python env
+venv/
+__pycache__/
+
+# macOS
+.DS_Store

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>ai.boringstack.agent-widgets</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/kaitonakamichi/.config/agent-widgets/agent-widgets</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <!-- Only in a real GUI session: an AppKit window needs WindowServer, and
+         starting before it exists would just crash-loop under KeepAlive. -->
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/kaitonakamichi/.config/agent-widgets/panel.log</string>
+</dict>
+</plist>
