@@ -25,10 +25,13 @@ refreshed on every poll; the collector's own 180s TTL means the APIs see
 roughly one call every 3 minutes.
 
 The window is freely draggable (click anywhere on the panel background and
-drag), joins all Spaces, and has no Dock icon. It floats above normal windows
-rather than sitting at desktop-icon level, so it no longer disappears behind
-whatever's in front — that's the tradeoff for being grabbable. A drag is
-persisted to `panel.json` (see "Moving the panel") so it reopens where you
+drag), joins all Spaces, and has no Dock icon. It still sits at desktop-icon
+level — behind normal app windows, exactly like before — so it reads as part
+of the desktop rather than floating over whatever you're working in. That
+means, like a Finder desktop icon, you can only click and drag it where it
+isn't currently covered by another window; move or minimize what's on top of
+it first if you need to grab it. A drag is persisted to `panel.json` (see
+"Moving the panel") so it reopens where you
 left it. Nothing here needs Screen Recording, Accessibility, or any other TCC
 permission.
 

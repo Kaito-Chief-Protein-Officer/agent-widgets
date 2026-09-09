@@ -1792,15 +1792,18 @@ final class PanelController {
         window.isOpaque = false
         window.backgroundColor = .clear
         window.hasShadow = true
-        // Was desktop-icon-level and click-through (`ignoresMouseEvents`), so
-        // it sat on the wallpaper and could never be grabbed. `.floating`
-        // keeps it above normal windows while still accepting mouse events,
-        // and `isMovableByWindowBackground` means clicking anywhere on the
-        // (otherwise control-free) panel drags the window — no custom mouse
-        // handling needed.
-        window.level = .floating
+        // Stays at desktop-icon level — behind normal app windows, exactly
+        // like before — so it still reads as part of the desktop rather than
+        // floating over whatever you're working in. `ignoresMouseEvents` was
+        // the only thing actually blocking dragging (a level below normal
+        // windows doesn't prevent clicks landing on it wherever it's not
+        // covered by something in front, same as dragging a Finder desktop
+        // icon). `isMovableByWindowBackground` means clicking anywhere on the
+        // (otherwise control-free) panel drags it — no custom mouse handling
+        // needed.
+        window.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopIconWindow)))
         window.isMovableByWindowBackground = true
-        window.collectionBehavior = [.canJoinAllSpaces, .ignoresCycle, .fullScreenAuxiliary]
+        window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
 
         window.contentView = Self.chrome(for: panel)
         window.orderFrontRegardless()
