@@ -24,18 +24,24 @@ The panel shells out to `collect.py` every 30s. The active-agent reading is
 refreshed on every poll; the collector's own 180s TTL means the APIs see
 roughly one call every 3 minutes.
 
-The window is freely draggable (click anywhere on the panel background and
-drag), joins all Spaces, and has no Dock icon. It sits at the normal window
-level — the same tier as any other app window — rather than desktop-icon
-level: that lower tier turned out to be effectively owned by Finder/the Dock
-for real desktop icons, and a third-party window placed there never reliably
-received mouseDown events for dragging. At the normal level it behaves like
-any other window: clicking it brings it forward and drags it, and it recedes
-behind whatever app you click into next, the same as an unfocused window
-normally does. A drag is persisted to `panel.json` (see "Moving the panel")
-so it reopens where you left it. Nothing here needs Screen Recording,
-Accessibility, or any other TCC
-permission.
+The window is click-through, joins all Spaces, has no Dock icon, and sits at
+desktop-icon level — so it lives on the wallpaper next to real desktop icons
+and widgets, and never covers a normal or full-screen window. That level and
+click-through combination is also, empirically, why it can't be dragged from
+rest: desktop-icon level is effectively Finder/Dock territory and a
+third-party window placed there never reliably receives mouseDown no matter
+what `ignoresMouseEvents` says.
+
+**Hold ⌥ (Option) and drag** to move it anyway. Holding ⌥ promotes the window
+to `.floating` — a level dragging is guaranteed to work on — for as long as
+the key is held, then it drops straight back to the click-through
+desktop-icon resting state the moment you release ⌥. The new position is
+persisted to `panel.json` (see "Moving the panel") so it reopens where you
+left it. ⌥ is tracked as a modifier only (no keystroke content is read), so
+this does not need Screen Recording, Accessibility, or Input Monitoring
+permission on any macOS version tested — but do check it actually fires on
+your machine, since global modifier monitoring has shifted permission
+requirements across macOS releases before.
 
 ## What the numbers mean
 
@@ -481,7 +487,7 @@ one and turns it into a blob.
 
 ## Moving the panel
 
-Just drag it — click anywhere on the panel background. The new position is
+Hold ⌥ and drag anywhere on the panel background. The new position is
 written back to `panel.json` as `x`/`y` about half a second after you let go
 (debounced so one drag is one write), and reopens there next launch.
 

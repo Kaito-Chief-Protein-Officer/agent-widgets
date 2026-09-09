@@ -1777,6 +1777,10 @@ final class PanelController {
     /// Set while `reposition()` itself sets the frame, so that programmatic
     /// move doesn't get mistaken for a user drag and re-saved as one.
     private var isRepositioning = false
+    /// True while ⌥ is held and the panel is (temporarily) draggable.
+    private var isInteractive = false
+    private var optionMonitorGlobal: Any?
+    private var optionMonitorLocal: Any?
 
     init(collector: String, configPath: String) {
         self.collector = collector
@@ -1792,22 +1796,22 @@ final class PanelController {
         window.isOpaque = false
         window.backgroundColor = .clear
         window.hasShadow = true
-        // Desktop-icon level turned out not to work for this: that tier is
-        // effectively owned by Finder/the Dock for real desktop icons, and a
-        // third-party window placed there never reliably receives mouseDown
-        // for dragging no matter what `ignoresMouseEvents`/
-        // `isMovableByWindowBackground` say (confirmed live — the panel sat
-        // there correctly but simply would not drag). `.normal` is the tier
-        // actual app windows use, where dragging is guaranteed to work: it
-        // now behaves like any other window on screen — click it and it
-        // comes forward and drags, click into another app and it recedes
-        // behind that app's windows like an unfocused window normally does.
-        // `isMovableByWindowBackground` means clicking anywhere on the
-        // (otherwise control-free) panel drags it — no custom mouse handling
-        // needed.
-        window.level = .normal
+        // Resting state is exactly the original behaviour: click-through, at
+        // desktop-icon level, so it lives on the wallpaper alongside real
+        // desktop icons/widgets and never overlaps a normal or full-screen
+        // window. Two things confirmed live and worth recording: (1) that
+        // level does not reliably deliver mouseDown to a third-party window
+        // even with `ignoresMouseEvents` off — it's effectively Finder/Dock
+        // territory — so dragging from rest is not possible here; (2)
+        // `.normal` drags fine but then sits in the ordinary app z-order and
+        // can cover a maximized/full-screen window. `observeOptionDrag()`
+        // below is the compromise: hold ⌥ to temporarily promote the window
+        // to something that actually receives events, drag it, then it drops
+        // back to this resting state the moment ⌥ is released.
+        window.ignoresMouseEvents = true
+        window.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopIconWindow)))
         window.isMovableByWindowBackground = true
-        window.collectionBehavior = [.canJoinAllSpaces, .ignoresCycle]
+        window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
 
         window.contentView = Self.chrome(for: panel)
         window.orderFrontRegardless()
@@ -1818,6 +1822,38 @@ final class PanelController {
         NotificationCenter.default.addObserver(
             forName: NSWindow.didMoveNotification,
             object: window, queue: .main) { [weak self] _ in self?.handleUserMove() }
+        observeOptionDrag()
+    }
+
+    /// ⌥ is a modifier-only signal (no keystroke content), so — unlike full
+    /// key monitoring — this does not need Accessibility/Input Monitoring
+    /// permission on any macOS version tested. Both a global and a local
+    /// monitor are registered because a global-only monitor never fires for
+    /// events that land while this app itself is the focused/key app.
+    private func observeOptionDrag() {
+        let handle: (NSEvent) -> Void = { [weak self] event in
+            self?.setInteractive(event.modifierFlags.contains(.option))
+        }
+        optionMonitorGlobal = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged, handler: handle)
+        optionMonitorLocal = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { event in
+            handle(event)
+            return event
+        }
+    }
+
+    /// Promotes the window to `.floating` (a level dragging is guaranteed to
+    /// work on) for exactly as long as ⌥ is held, then demotes it straight
+    /// back to the inert desktop-icon resting state.
+    private func setInteractive(_ interactive: Bool) {
+        guard interactive != isInteractive else { return }
+        isInteractive = interactive
+        if interactive {
+            window.level = .floating
+            window.ignoresMouseEvents = false
+        } else {
+            window.ignoresMouseEvents = true
+            window.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopIconWindow)))
+        }
     }
 
     /// A drag just ended (or is still in flight — dragging fires many of
