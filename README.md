@@ -13,9 +13,9 @@ garmin-login.py    one-time interactive Garmin Connect sign-in
 garmin.json        latest health snapshot
 garth/             Garmin OAuth tokens, mode 700. No password is ever stored.
 venv/              python venv holding garminconnect, the only dependency
-AgentWidgets.swift the panel: borderless, freely draggable AppKit window
+AgentWidgets.swift the panel + menu bar item: borderless AppKit window
 agent-widgets      the compiled binary
-panel.json         placement (screen / corner / margin)
+panel.json         placement (screen / corner / margin, plus dragged x/y)
 build.sh           rebuild + restart
 ```
 
@@ -23,6 +23,22 @@ Started at login by `~/Library/LaunchAgents/ai.boringstack.agent-widgets.plist`.
 The panel shells out to `collect.py` every 30s. The active-agent reading is
 refreshed on every poll; the collector's own 180s TTL means the APIs see
 roughly one call every 3 minutes.
+
+## Menu bar
+
+A speedometer icon in the menu bar carries **Hide/Show Panel** and **Quit**.
+Because the panel is click-through and the app is `.accessory` — no window
+chrome, no Dock icon, no menu of its own — that icon is the only way to reach
+it short of `launchctl` or Activity Monitor.
+
+Hiding leaves the 30s refresh running, so a panel hidden for an hour is
+current the moment it comes back. Quit exits 0, and the LaunchAgent's
+`KeepAlive` is `SuccessfulExit: false` rather than plain `true`, so a
+deliberate quit stays quit until the next login while a crash is still
+restarted. Editing that plist needs a full reload to take effect —
+`launchctl bootout gui/$(id -u)/ai.boringstack.agent-widgets` then
+`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.boringstack.agent-widgets.plist`;
+`build.sh`'s kickstart only re-execs the binary.
 
 The window is click-through, joins all Spaces, has no Dock icon, and sits at
 desktop-icon level — so it lives on the wallpaper next to real desktop icons

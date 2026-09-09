@@ -10,8 +10,13 @@
     </array>
     <key>RunAtLoad</key>
     <true/>
+    <!-- Restart on crash, but honour a deliberate Quit from the menu bar:
+         a clean exit(0) stays down until the next login. -->
     <key>KeepAlive</key>
-    <true/>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
     <key>ProcessType</key>
     <string>Interactive</string>
     <!-- Only in a real GUI session: an AppKit window needs WindowServer, and

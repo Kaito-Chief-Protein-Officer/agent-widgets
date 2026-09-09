@@ -1763,7 +1763,7 @@ final class ClusterView: ThemeView {
 
 // MARK: - Controller
 
-final class PanelController {
+final class PanelController: NSObject {
     private let window: NSWindow
     private var panel: ThemeView
     private let collector: String
@@ -1781,18 +1781,27 @@ final class PanelController {
     private var isInteractive = false
     private var optionMonitorGlobal: Any?
     private var optionMonitorLocal: Any?
+    /// Menu bar presence. Held strongly because `NSStatusBar` does not retain
+    /// its items, and an unretained one silently vanishes from the menu bar.
+    private var statusItem: NSStatusItem?
+    /// Retitled on toggle, so the item always names what it will do next.
+    private var toggleItem: NSMenuItem?
 
     init(collector: String, configPath: String) {
         self.collector = collector
         self.configPath = configPath
         let config = PanelConfig.load(configPath)
         self.config = config
-        self.panel = ThemeView.make(config.theme)
+        let panel = ThemeView.make(config.theme)
+        self.panel = panel
 
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: panel.panelWidth, height: 120),
-                          styleMask: .borderless,
-                          backing: .buffered,
-                          defer: false)
+        // Built through locals because a subclass initializer cannot touch
+        // `self` until `super.init()` has run, and `super.init()` cannot run
+        // until every stored property is set.
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: panel.panelWidth, height: 120),
+                              styleMask: .borderless,
+                              backing: .buffered,
+                              defer: false)
         window.isOpaque = false
         window.backgroundColor = .clear
         window.hasShadow = true
@@ -1815,6 +1824,9 @@ final class PanelController {
 
         window.contentView = Self.chrome(for: panel)
         window.orderFrontRegardless()
+        self.window = window
+
+        super.init()
 
         NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
@@ -1854,6 +1866,51 @@ final class PanelController {
             window.ignoresMouseEvents = true
             window.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopIconWindow)))
         }
+    }
+
+    // MARK: - Menu bar
+
+    /// The panel is click-through and the app is `.accessory`, so it has no
+    /// window chrome, no Dock icon and no menu of its own. This status item is
+    /// the only way to reach it without `launchctl` or Activity Monitor.
+    func installStatusItem() {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        let icon = NSImage(systemSymbolName: "speedometer", accessibilityDescription: "Agent Widgets")
+        icon?.isTemplate = true
+        item.button?.image = icon
+
+        let menu = NSMenu()
+        let toggle = NSMenuItem(title: "Hide Panel", action: #selector(togglePanel), keyEquivalent: "")
+        toggle.target = self
+        menu.addItem(toggle)
+        menu.addItem(.separator())
+        let quit = NSMenuItem(title: "Quit", action: #selector(quitPanel), keyEquivalent: "q")
+        quit.target = self
+        menu.addItem(quit)
+        item.menu = menu
+
+        statusItem = item
+        toggleItem = toggle
+    }
+
+    /// Ordering out leaves the refresh timer running, so a panel that has been
+    /// hidden for an hour is current the moment it comes back — `resize()` and
+    /// `reposition()` both set the frame without ordering the window in.
+    @objc private func togglePanel() {
+        if window.isVisible {
+            window.orderOut(nil)
+            toggleItem?.title = "Show Panel"
+        } else {
+            window.orderFrontRegardless()
+            toggleItem?.title = "Hide Panel"
+        }
+    }
+
+    /// Exits 0, which the LaunchAgent's `KeepAlive`/`SuccessfulExit` pair
+    /// reads as deliberate: it stays quit until the next login instead of
+    /// being restarted a second later.
+    @objc private func quitPanel() {
+        NSApp.terminate(nil)
     }
 
     /// A drag just ended (or is still in flight — dragging fires many of
@@ -2023,6 +2080,7 @@ let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 
 let controller = PanelController(collector: collectorPath, configPath: configPath)
+controller.installStatusItem()
 controller.start()
 
 app.run()
