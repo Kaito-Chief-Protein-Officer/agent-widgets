@@ -8,10 +8,13 @@ Never writes tokens, emails or account identifiers to the cache file.
 import argparse
 import json
 import os
+import re
+import sqlite3
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+import urllib.parse
+from datetime import datetime, timedelta, timezone
 
 CONFIG_DIR = os.path.expanduser("~/.config/agent-widgets")
 CACHE_FILE = os.path.join(CONFIG_DIR, "cache.json")
@@ -29,9 +32,19 @@ HEADER_MARK = "__agent_widgets_headers__"
 ANTHROPIC_URL = "https://api.anthropic.com/api/oauth/usage"
 ANTHROPIC_BETA = "oauth-2025-04-20"
 KEYCHAIN_SERVICE = "Claude Code-credentials"
+# One Claude card per signed-in account. Claude Code keeps one login per
+# config dir, so a second subscription is a second CLAUDE_CONFIG_DIR with its
+# own keychain entry. accounts.json lists them; without it, the panel reads the
+# default login exactly as it always has.
+ACCOUNTS_FILE = os.path.join(CONFIG_DIR, "accounts.json")
+DEFAULT_CLAUDE_CONFIG_DIR = "~/.claude"
+DEFAULT_CLAUDE_ACCOUNTS = [
+    {"id": "claude", "label": "Claude Code", "config_dir": DEFAULT_CLAUDE_CONFIG_DIR}
+]
 
 CODEX_URL = "https://chatgpt.com/backend-api/codex/usage"
 CODEX_AUTH_FILE = os.path.expanduser("~/.codex/auth.json")
+PS = "/bin/ps"
 
 
 def warn(msg):
@@ -119,24 +132,118 @@ def parse_retry_after(value):
 # --- credentials (read fresh every poll, never cached) -----------------------
 
 
-def claude_token():
+def claude_accounts():
+    """Accounts from accounts.json, validated; the default login if absent.
+
+    Each entry: {"id", "label", "config_dir", "keychain_service"?}. The id is
+    the card id (so `--simulate reauth:<id>` works) and the label is what the
+    panel prints — pick something that is not an email address, because the
+    cache is meant to stay free of identity.
+    """
+    config = read_json(ACCOUNTS_FILE) or {}
+    accounts = []
+    seen = set()
+    for raw in config.get("claude") or []:
+        if not isinstance(raw, dict):
+            continue
+        account_id = str(raw.get("id") or "").strip()
+        if not account_id or account_id in seen or ":" in account_id:
+            continue
+        seen.add(account_id)
+        accounts.append(
+            {
+                "id": account_id,
+                "label": str(raw.get("label") or account_id),
+                "config_dir": str(raw.get("config_dir") or DEFAULT_CLAUDE_CONFIG_DIR),
+                "keychain_service": raw.get("keychain_service"),
+            }
+        )
+    return accounts or [dict(account) for account in DEFAULT_CLAUDE_ACCOUNTS]
+
+
+def keychain_claude_services():
+    """Every `Claude Code-credentials*` service in the login keychain.
+
+    `dump-keychain` lists item attributes only — no secrets, no prompt.
+    """
     try:
-        raw = subprocess.run(
-            ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        ).stdout.strip()
-        return json.loads(raw).get("claudeAiOauth", {}).get("accessToken")
+        proc = subprocess.run(
+            ["security", "dump-keychain"], capture_output=True, text=True, timeout=10
+        )
     except Exception:
-        pass
+        return []
+    import re
+
+    found = re.findall(r'"svce"<blob>="(Claude Code-credentials[^"]*)"', proc.stdout)
+    return sorted(set(found))
+
+
+# Services handed out to non-default accounts during this run, so two of them
+# never read the same entry. Reset by providers().
+_claimed_services = set()
+
+
+def claude_keychain_services(account):
+    """Keychain service names to try for one account's config dir.
+
+    The default config dir uses the bare service name. Claude Code keys any
+    other CLAUDE_CONFIG_DIR to its own entry, suffixing the service name — the
+    documented behaviour, but not the documented rule — so the first guess is
+    the obvious hash and the fallback is whatever suffixed entries exist that
+    no other account has claimed. With one extra account that always resolves;
+    with more, set `keychain_service` in accounts.json explicitly.
+    """
+    if account.get("keychain_service"):
+        return [str(account["keychain_service"])]
+    config_dir = os.path.expanduser(account["config_dir"]).rstrip("/")
+    if config_dir == os.path.expanduser(DEFAULT_CLAUDE_CONFIG_DIR).rstrip("/"):
+        return [KEYCHAIN_SERVICE]
+    import hashlib
+
+    digest = hashlib.sha256(config_dir.encode("utf-8")).hexdigest()[:8]
+    guesses = [f"{KEYCHAIN_SERVICE}-{digest}"]
+    for service in keychain_claude_services():
+        if service == KEYCHAIN_SERVICE or service in guesses or service in _claimed_services:
+            continue
+        guesses.append(service)
+    return guesses
+
+
+def claude_credentials(account):
+    """-> the `claudeAiOauth` block for one account, or None."""
+    for service in claude_keychain_services(account):
+        try:
+            proc = subprocess.run(
+                ["security", "find-generic-password", "-s", service, "-w"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                oauth = json.loads(proc.stdout.strip()).get("claudeAiOauth") or {}
+                if oauth.get("accessToken"):
+                    _claimed_services.add(service)
+                    return oauth
+        except Exception:
+            pass
     # Non-macOS / no-keychain fallback used by Claude Code itself.
     try:
-        cred_file = os.path.expanduser("~/.claude/.credentials.json")
+        cred_file = os.path.join(os.path.expanduser(account["config_dir"]), ".credentials.json")
         with open(cred_file) as handle:
-            return json.load(handle).get("claudeAiOauth", {}).get("accessToken")
+            oauth = json.load(handle).get("claudeAiOauth") or {}
+            return oauth if oauth.get("accessToken") else None
     except Exception:
         return None
+
+
+def claude_plan(oauth):
+    """Plan tier from the credential block: "max 20x", "team", "pro". No identity."""
+    plan = str(oauth.get("subscriptionType") or "").strip().lower()
+    tier = str(oauth.get("rateLimitTier") or "").strip().lower()
+    multiplier = tier.rsplit("_", 1)[-1] if tier else ""
+    if plan and multiplier[:-1].isdigit() and multiplier.endswith("x"):
+        return f"{plan} {multiplier}"
+    return plan or None
 
 
 def codex_credentials():
@@ -166,13 +273,13 @@ def iso_to_epoch(value):
         return None
 
 
-def fetch_claude():
-    token = claude_token()
-    if not token:
+def fetch_claude(account):
+    oauth = claude_credentials(account)
+    if not oauth:
         raise HttpError(401)
     data = get_json(
         ANTHROPIC_URL,
-        {"Authorization": f"Bearer {token}", "anthropic-beta": ANTHROPIC_BETA},
+        {"Authorization": f"Bearer {oauth['accessToken']}", "anthropic-beta": ANTHROPIC_BETA},
     )
     meters = []
     for name, key in (("5h", "five_hour"), ("week", "seven_day")):
@@ -188,9 +295,12 @@ def fetch_claude():
             }
         )
     return {
-        "id": "claude",
-        "label": "Claude Code",
-        "sub": None,  # Anthropic's response carries no plan/tier field.
+        "id": account["id"],
+        "provider": "claude",
+        "label": account["label"],
+        # Anthropic's usage response carries no plan field; the tier comes
+        # from the credential block Claude Code stores alongside the token.
+        "sub": claude_plan(oauth),
         "kind": "meters",
         "meters": meters,
         "state": "ok",
@@ -230,11 +340,72 @@ def fetch_codex():
     plan = data.get("plan_type")
     return {
         "id": "codex",
+        "provider": "codex",
         "label": "Codex",
         "sub": str(plan) if plan else None,
         "kind": "meters",
         "meters": meters,
         "state": "ok",
+    }
+
+
+# --- active local agents ----------------------------------------------------
+# A process name alone is not enough: both desktop apps spawn helpers named
+# after the product, and Codex/OpenCode both keep management and server
+# infrastructure alive under the same executable name as the CLI agent.
+
+NON_AGENT_CODEX_COMMANDS = {
+    "app-server", "sandbox", "mcp-server", "cloud", "completion",
+}
+
+# Everything opencode's CLI does besides starting or attaching to a live
+# session: shell completion, protocol/MCP servers, credential and plugin
+# management, headless serve/web hosting, and read-only inspection commands.
+NON_AGENT_OPENCODE_COMMANDS = {
+    "completion", "acp", "mcp", "attach", "debug", "providers", "auth",
+    "agent", "upgrade", "uninstall", "serve", "web", "models", "stats",
+    "export", "import", "github", "session", "plugin", "plug", "db",
+}
+
+
+def active_agent_counts(ps_output=None):
+    if ps_output is None:
+        proc = subprocess.run(
+            [PS, "-axo", "comm=,args="], capture_output=True, text=True, timeout=5
+        )
+        if proc.returncode != 0:
+            raise RuntimeError("process inspection failed")
+        ps_output = proc.stdout
+
+    counts = {"claude": 0, "codex": 0, "opencode": 0}
+    for line in ps_output.splitlines():
+        fields = line.strip().split(None, 1)
+        if not fields:
+            continue
+        executable = os.path.basename(fields[0])
+        if executable not in counts:
+            continue
+        argv = fields[1].split() if len(fields) > 1 else []
+        command = argv[1] if len(argv) > 1 and not argv[1].startswith("-") else None
+        if executable == "codex" and command in NON_AGENT_CODEX_COMMANDS:
+            continue
+        if executable == "opencode" and command in NON_AGENT_OPENCODE_COMMANDS:
+            continue
+        counts[executable] += 1
+    return counts
+
+
+def fetch_agents():
+    counts = active_agent_counts()
+    return {
+        "id": "agents", "kind": "agents", "label": "Active Agents",
+        "active_total": sum(counts.values()),
+        "stats": [
+            {"label": "claude", "value": str(counts["claude"])},
+            {"label": "codex", "value": str(counts["codex"])},
+            {"label": "opencode", "value": str(counts["opencode"])},
+        ],
+        "meters": [], "state": "ok",
     }
 
 
@@ -260,6 +431,41 @@ MODEL_LABELS = {
     "claude-haiku-4-5": "Haiku 4.5",
 }
 
+# --- local models ------------------------------------------------------------
+#
+# "Local" means served from this machine, so the tokens cost no subscription
+# quota. That is why local burn is a card of its own rather than a slice of the
+# mix: against a frontier model its share rounds to 0% and disappears, and a
+# percentage of somebody else's quota is the wrong reading for it anyway.
+#
+# Two questions, two sources. Which models exist and which is resident comes
+# from the Ollama daemon. How many tokens they generated does not: Ollama's log
+# records prompt-cache totals and speculative-decode stats but never an output
+# count, so consumption is read from whatever drove the model.
+
+OLLAMA_URL = "http://127.0.0.1:11434"
+HERMES_LOG = os.path.expanduser("~/.hermes/logs/agent.log")
+OPENCODE_DB = os.path.expanduser("~/.local/share/opencode/opencode.db")
+LOCAL_ROWS = 4
+
+# What a client calls a local endpoint. Hermes declares its Ollama connection
+# as "custom" — an OpenAI-compatible base URL — not as "ollama".
+LOCAL_PROVIDERS = ("custom", "ollama", "lmstudio", "local")
+
+# 2026-09-05 13:17:50,398 INFO [...] agent.conversation_loop: API call #24:
+# model=qwen3.8:27b-mlx provider=custom in=87704 out=360 total=88064 latency=…
+HERMES_CALL = re.compile(
+    r"^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}),\d+ .*?API call #\d+: "
+    r"model=(\S+) provider=(\S+) in=\d+ out=(\d+)"
+)
+
+# A trailing quantisation is noise in a model's name; a variant tag is not.
+QUANT_TAG = re.compile(r"-?(?:q\d+[_a-z0-9]*|f(?:p)?\d+|bf\d+|nvfp\d+)$", re.I)
+
+# collect.py runs once per pass and exits, so a plain dict is the right cache:
+# it holds the single Ollama probe and the single log scan for that pass.
+_run_cache = {}
+
 
 def model_label(model_id):
     if model_id in MODEL_LABELS:
@@ -269,6 +475,29 @@ def model_label(model_id):
         if name.startswith(prefix):
             name = name[len(prefix) :]
     return name
+
+
+def local_label(model_id):
+    """"qwen3.8:27b-mtp-q4_K_M" -> "qwen3.8-27b-mtp".
+
+    The tag after the colon belongs in the name when it identifies a variant
+    ("27b-mlx") and does not when it only names a quantisation ("q4_K_M"),
+    which every model on disk carries and none is distinguished by.
+    """
+    base, _, tag = model_id.partition(":")
+    tag = QUANT_TAG.sub("", tag)
+    return f"{base}-{tag}" if tag else base
+
+
+def identity(line):
+    return line
+
+
+def window_cutoff(days):
+    """The oldest day still inside a window, as an ISO date string."""
+    return str(
+        datetime.fromtimestamp(time.time() - days * 86400, tz=timezone.utc).date()
+    )
 
 
 def scan_claude_line(record, state):
@@ -305,18 +534,47 @@ def scan_codex_line(record, state):
     return timestamp[:10], state["model"], output
 
 
+def scan_hermes_line(line, state):
+    """-> (day, model_id, output_tokens) or None.
+
+    Hermes resolves the model, provider and token counts itself and logs one
+    line per API call, so nothing has to be inferred here. It stamps local
+    time while the Claude and Codex logs stamp UTC, so the day is converted
+    before bucketing — otherwise an evening call lands a day early.
+    """
+    match = HERMES_CALL.match(line)
+    if not match:
+        return None
+    date, clock, model, provider, output = match.groups()
+    output = int(output)
+    if not output:
+        return None
+    if provider in LOCAL_PROVIDERS:
+        state.setdefault("local", set()).add(model)
+    try:
+        stamp = datetime.strptime(f"{date} {clock}", "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    return str(stamp.astimezone(timezone.utc).date()), model, output
+
+
 SOURCES = [(CLAUDE_LOG_ROOT, scan_claude_line), (CODEX_LOG_ROOT, scan_codex_line)]
 
 
-def scan_log(path, entry, parse):
+def scan_log(path, entry, parse, decode=json.loads):
     """Read appended bytes only. Returns True if the entry changed."""
     try:
         size = os.path.getsize(path)
     except OSError:
         return False
     offset = entry.get("offset", 0)
-    if size < offset:  # truncated or rotated — start over
-        offset, entry["offset"], entry["days"], entry["model"] = 0, 0, {}, None
+    if size < offset:
+        # Truncated or rotated — reread from the top, but keep the day buckets.
+        # Hermes recreates its log on every launch, and the tally it already
+        # contributed is not wrong just because the evidence was replaced.
+        # Session files are append-only and never rewritten, so no source
+        # double-counts a day this way.
+        offset, entry["offset"], entry["model"] = 0, 0, None
     if size == offset:
         return False
 
@@ -329,12 +587,12 @@ def scan_log(path, entry, parse):
     consumed = len(chunk) - len(tail)
 
     days = entry.setdefault("days", {})
-    state = {"model": entry.get("model")}
+    state = {"model": entry.get("model"), "local": set(entry.get("local") or [])}
     for raw in lines:
         if not raw:
             continue
         try:
-            record = json.loads(raw.decode("utf-8", "replace"))
+            record = decode(raw.decode("utf-8", "replace"))
         except Exception:
             continue
         result = parse(record, state)
@@ -345,10 +603,142 @@ def scan_log(path, entry, parse):
 
     entry["offset"] = offset + consumed
     entry["model"] = state.get("model")
+    if state["local"]:
+        entry["local"] = sorted(state["local"])
     return True
 
 
-def fetch_models():
+def scan_opencode(store):
+    """Local-model tokens from OpenCode's message store.
+
+    OpenCode keeps one JSON blob per message in SQLite rather than an append-
+    only log, so this carries a high-water mark on `time_created` instead of a
+    byte offset. Unproven on this machine: the store exists and is empty (no
+    sessions, no messages), so the parse below is written to the documented
+    message shape and reads nothing until a session is recorded.
+    """
+    days = store.setdefault("days", {})
+    since = store.get("since", 0)
+    local = set(store.get("local") or [])
+    try:
+        connection = sqlite3.connect(f"file:{OPENCODE_DB}?mode=ro", uri=True)
+    except Exception:
+        return
+    try:
+        rows = connection.execute(
+            "select time_created, data from message where time_created > ? "
+            "order by time_created",
+            (since,),
+        ).fetchall()
+    except Exception as exc:  # schema drift, or a WAL it cannot open read-only
+        warn(f"local: opencode {type(exc).__name__}")
+        rows = []
+    finally:
+        connection.close()
+
+    for created, blob in rows:
+        created = created or 0
+        since = max(since, created)
+        try:
+            data = json.loads(blob)
+        except Exception:
+            continue
+        if data.get("role") != "assistant":
+            continue
+        model = data.get("modelID") or data.get("model")
+        provider = data.get("providerID") or data.get("provider")
+        output = ((data.get("tokens") or {}).get("output")) or 0
+        if not model or not output:
+            continue
+        if provider in LOCAL_PROVIDERS:
+            local.add(model)
+        # Milliseconds in the documented shape; tolerate seconds rather than
+        # bucket a real message into 1970 and prune it on the same pass.
+        seconds = created / 1000 if created > 1_000_000_000_000 else created
+        day = str(datetime.fromtimestamp(seconds, tz=timezone.utc).date())
+        days.setdefault(day, {})
+        days[day][model] = days[day].get(model, 0) + output
+
+    store["since"] = since
+    if local:
+        store["local"] = sorted(local)
+
+
+def ollama_snapshot():
+    """(installed, resident_bytes, reachable) from the Ollama daemon.
+
+    Never raises: a daemon that is not running is a reading — nothing is
+    resident — not a collection failure, and the token history stands on its
+    own without it.
+    """
+    if "ollama" in _run_cache:
+        return _run_cache["ollama"]
+
+    installed, resident_bytes, reachable = [], 0, False
+    try:
+        tags = get_json(f"{OLLAMA_URL}/api/tags", {}) or {}
+        reachable = True
+        try:
+            running = get_json(f"{OLLAMA_URL}/api/ps", {}) or {}
+        except Exception:
+            running = {}
+        resident = {}
+        for entry in running.get("models") or []:
+            name = entry.get("model") or entry.get("name")
+            if name:
+                resident[name] = entry.get("size_vram") or 0
+        resident_bytes = sum(resident.values())
+        for entry in tags.get("models") or []:
+            name = entry.get("model") or entry.get("name")
+            if not name:
+                continue
+            installed.append(
+                {
+                    "id": name,
+                    "size": entry.get("size") or 0,
+                    "resident": name in resident,
+                }
+            )
+    except Exception as exc:
+        warn(f"local: ollama {type(exc).__name__}")
+
+    _run_cache["ollama"] = (installed, resident_bytes, reachable)
+    return _run_cache["ollama"]
+
+
+def local_ids(index):
+    """Every model id known to be served from this machine.
+
+    The union of what the daemon has on disk and what any client reported
+    against a local provider, persisted — so attribution survives the daemon
+    being down, and a model deleted mid-window still explains its own tokens.
+    """
+    known = set(index.get("local_ids") or [])
+    for store in (index.get("files") or {}, index.get("local_files") or {}):
+        for entry in store.values():
+            known.update(entry.get("local") or [])
+    known.update((index.get("opencode") or {}).get("local") or [])
+    installed, _, _ = ollama_snapshot()
+    known.update(model["id"] for model in installed)
+    return known
+
+
+def prune(store, cutoff):
+    for entry in store.values():
+        days = entry.get("days") or {}
+        for day in [day for day in days if day < cutoff]:
+            del days[day]
+
+
+def model_index():
+    """Scan every session log once per pass and return the shared index.
+
+    Both cards read this: the mix takes the cloud models out of it, the local
+    card takes the local ones, and neither rescans.
+    """
+    if "index" in _run_cache:
+        return _run_cache["index"]
+
     index = read_json(MODELS_INDEX_FILE) or {}
     files = index.setdefault("files", {})
     palette = index.setdefault("palette", {})
@@ -363,38 +753,61 @@ def fetch_models():
                 seen.add(path)
                 scan_log(path, files.setdefault(path, {}), parse)
 
-    cutoff_keep = str(
-        datetime.fromtimestamp(
-            time.time() - MODEL_RETENTION_DAYS * 86400, tz=timezone.utc
-        ).date()
-    )
+    cutoff_keep = window_cutoff(MODEL_RETENTION_DAYS)
     for path in list(files):
         if path not in seen:
             del files[path]
-            continue
-        days = files[path].get("days") or {}
-        for day in [d for d in days if d < cutoff_keep]:
-            del days[day]
+    prune(files, cutoff_keep)
 
-    cutoff = str(
-        datetime.fromtimestamp(
-            time.time() - MODEL_WINDOW_DAYS * 86400, tz=timezone.utc
-        ).date()
+    # Local clients keep their tallies in their own stores, so a client that
+    # also talks to a cloud model can never leak that burn into the mix.
+    local_files = index.setdefault("local_files", {})
+    scan_log(
+        HERMES_LOG,
+        local_files.setdefault(HERMES_LOG, {}),
+        scan_hermes_line,
+        decode=identity,
     )
+    prune(local_files, cutoff_keep)
+    scan_opencode(index.setdefault("opencode", {}))
+    prune({"opencode": index["opencode"]}, cutoff_keep)
+
+    index["local_ids"] = sorted(local_ids(index))
+
+    # Colour follows the model, not its rank or its card: slots are assigned on
+    # first sight and persisted, so a reshuffle never repaints the others and a
+    # model keeps its hue wherever it appears.
+    for store in (files, local_files, {"opencode": index["opencode"]}):
+        for entry in store.values():
+            for models in (entry.get("days") or {}).values():
+                for model in sorted(models):
+                    if model not in palette:
+                        palette[model] = len(palette)
+
+    write_json(MODELS_INDEX_FILE, index)
+    _run_cache["index"] = index
+    return index
+
+
+def slot_for(index, model):
+    slot = (index.get("palette") or {}).get(model, MODEL_SLOTS)
+    return slot if slot < MODEL_SLOTS else MODEL_SLOTS
+
+
+def fetch_models():
+    index = model_index()
+    local = local_ids(index)
+    cutoff = window_cutoff(MODEL_WINDOW_DAYS)
+
     totals = {}
-    for entry in files.values():
+    for entry in (index.get("files") or {}).values():
         for day, models in (entry.get("days") or {}).items():
             if day < cutoff:
                 continue
             for model, output in models.items():
+                if model in local:
+                    continue  # costs no quota; it has its own card
                 totals[model] = totals.get(model, 0) + output
-
-    # Colour follows the model, not its rank: slots are assigned on first sight
-    # and persisted, so a reshuffle in the ranking never repaints the others.
-    for model in sorted(totals):
-        if model not in palette:
-            palette[model] = len(palette)
-    write_json(MODELS_INDEX_FILE, index)
 
     if not totals:
         return {"id": "models", "kind": "models", "label": "Models",
@@ -404,13 +817,12 @@ def fetch_models():
     ranked = sorted(totals.items(), key=lambda item: -item[1])
     rows = []
     for model, output in ranked[:MODEL_ROWS]:
-        slot = palette.get(model, MODEL_SLOTS)
         rows.append(
             {
                 "label": model_label(model),
                 "value": output,
                 "share": round(100 * output / grand),
-                "slot": slot if slot < MODEL_SLOTS else MODEL_SLOTS,
+                "slot": slot_for(index, model),
             }
         )
     rest = sum(output for _, output in ranked[MODEL_ROWS:])
@@ -430,6 +842,229 @@ def fetch_models():
         "label": "Models",
         "sub": f"{MODEL_WINDOW_DAYS}d",
         "rows": rows,
+        "meters": [],
+        "state": "ok",
+    }
+
+
+def local_totals(index):
+    """7-day output tokens per local model, from every client that ran one."""
+    cutoff = window_cutoff(MODEL_WINDOW_DAYS)
+    local = local_ids(index)
+    totals = {}
+    stores = [
+        index.get("files") or {},
+        index.get("local_files") or {},
+        {"opencode": index.get("opencode") or {}},
+    ]
+    for store in stores:
+        for entry in store.values():
+            for day, models in (entry.get("days") or {}).items():
+                if day < cutoff:
+                    continue
+                for model, output in models.items():
+                    if model in local:
+                        totals[model] = totals.get(model, 0) + output
+    return totals
+
+
+def physical_memory():
+    try:
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    except (ValueError, OSError, AttributeError):
+        return 0
+
+
+def fetch_local():
+    """Local models: what is on disk, what is resident, what it has generated.
+
+    Rows are every model on disk plus any that generated tokens inside the
+    window, so a model that has never been run still reads as available — the
+    card answers "what can run here" as well as "what has run".
+    """
+    installed, resident_bytes, reachable = ollama_snapshot()
+    index = model_index()
+    totals = local_totals(index)
+
+    on_disk = {model["id"]: model for model in installed}
+    rows = []
+    for model_id in set(on_disk) | set(totals):
+        entry = on_disk.get(model_id) or {}
+        rows.append(
+            {
+                "label": local_label(model_id),
+                "value": totals.get(model_id, 0),
+                "share": 0,
+                "slot": slot_for(index, model_id),
+                "size": entry.get("size", 0),
+                "resident": bool(entry.get("resident")),
+            }
+        )
+    rows.sort(key=lambda row: (-row["value"], row["label"]))
+
+    grand = sum(row["value"] for row in rows)
+    for row in rows:
+        row["share"] = round(100 * row["value"] / grand) if grand else 0
+
+    if len(rows) > LOCAL_ROWS:
+        rest = rows[LOCAL_ROWS:]
+        rows = rows[:LOCAL_ROWS]
+        rows.append(
+            {
+                "label": f"+{len(rest)} more",
+                "value": sum(row["value"] for row in rest),
+                "share": sum(row["share"] for row in rest),
+                "slot": MODEL_SLOTS,
+                "size": sum(row["size"] for row in rest),
+                "resident": any(row["resident"] for row in rest),
+            }
+        )
+
+    stats = [
+        {"label": "resident", "value": compact_bytes(resident_bytes)},
+        {"label": "of", "value": compact_bytes(physical_memory())},
+    ]
+
+    return {
+        "id": "local",
+        "kind": "local",
+        "label": "Local",
+        # The title rail says where the reading came from, and says so loudly
+        # when the daemon is not answering — nothing is resident then, and a
+        # blank column would otherwise read as "nothing is loaded".
+        "sub": "ollama" if reachable else "offline",
+        "rows": rows,
+        "meters": [],
+        "stats": stats,
+        "state": "ok",
+    }
+
+
+def compact_bytes(value):
+    """Memory, in binary units — the ones a machine's RAM is sold and reported
+    in, so the resident figure and the 128G it is measured against share a
+    scale. Weights on disk are quoted decimally instead, matching `ollama
+    list`; that formatting lives in the panel, next to the row that shows it.
+    """
+    if value >= 1 << 30:
+        return f"{value / (1 << 30):.0f}G"
+    if value >= 1 << 20:
+        return f"{value / (1 << 20):.0f}M"
+    return str(value)
+
+
+# --- merged pull requests ----------------------------------------------------
+#
+# One search call answers both questions the card asks: the rolling 24h count
+# and the daily histogram. Buckets are built from the returned items rather
+# than from `total_count`, because a count cannot be split into days.
+
+GITHUB_SEARCH_URL = "https://api.github.com/search/issues"
+GITHUB_API_VERSION = "2022-11-28"
+# Scope of "merged". The rest of the panel is personal instruments, so this is
+# too: PRs this account authored. Change to `org:foo` or `repo:foo/bar` for a
+# team reading — nothing else in the card depends on the scope.
+PR_SCOPE = "author:@me"
+PR_WINDOW_DAYS = 7
+PR_PAGE_SIZE = 100
+# 300 merges inside the query window. Ordered newest-first, so overflowing
+# drops the oldest days and never the 24h figure — and it warns rather than
+# quietly reading low.
+PR_MAX_PAGES = 3
+# gh stores the token in the login keychain; PATH is not inherited from the
+# shell when launchd starts the panel, so the binary is looked up by hand.
+GH_CANDIDATES = ["/opt/homebrew/bin/gh", "/usr/local/bin/gh", "/usr/bin/gh"]
+
+
+def github_token():
+    for name in ("GITHUB_TOKEN", "GH_TOKEN"):
+        token = os.environ.get(name)
+        if token:
+            return token.strip()
+    for path in GH_CANDIDATES:
+        if not os.path.exists(path):
+            continue
+        try:
+            proc = subprocess.run([path, "auth", "token"], capture_output=True,
+                                  text=True, timeout=10)
+        except Exception:
+            continue
+        token = proc.stdout.strip()
+        if proc.returncode == 0 and token:
+            return token
+    return None
+
+
+def zulu_to_epoch(value):
+    """GitHub stamps times as `...Z`, which 3.9's fromisoformat rejects."""
+    if not value:
+        return None
+    return iso_to_epoch(value[:-1] + "+00:00" if value.endswith("Z") else value)
+
+
+def fetch_prs():
+    token = github_token()
+    if not token:
+        raise HttpError(401)
+
+    # The query window is UTC dates but the buckets are local days, because the
+    # chart's columns have to be the user's days. One extra day of slack covers
+    # the offset in either direction.
+    since = datetime.fromtimestamp(
+        time.time() - (PR_WINDOW_DAYS + 1) * 86400, tz=timezone.utc
+    ).date()
+    query = urllib.parse.quote(f"is:pr is:merged {PR_SCOPE} merged:>={since}")
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": GITHUB_API_VERSION,
+    }
+
+    stamps = []
+    truncated = False
+    for page in range(1, PR_MAX_PAGES + 1):
+        data = get_json(
+            f"{GITHUB_SEARCH_URL}?q={query}&advanced_search=true"
+            f"&sort=updated&order=desc&per_page={PR_PAGE_SIZE}&page={page}",
+            headers,
+        )
+        items = data.get("items") or []
+        for item in items:
+            merged_at = (item.get("pull_request") or {}).get("merged_at")
+            epoch = zulu_to_epoch(merged_at) or zulu_to_epoch(item.get("closed_at"))
+            if epoch:
+                stamps.append(epoch)
+        if len(items) < PR_PAGE_SIZE:
+            break
+        if page == PR_MAX_PAGES and (data.get("total_count") or 0) > PR_MAX_PAGES * PR_PAGE_SIZE:
+            truncated = True
+    if truncated:
+        warn(f"prs: capped at {PR_MAX_PAGES * PR_PAGE_SIZE}; older days read low")
+
+    now = time.time()
+    merged_24h = sum(1 for epoch in stamps if epoch >= now - 86400)
+
+    # Local calendar days, oldest first, today last. Days with no merges are
+    # kept as zeros — a gap in the chart is the reading, not missing data.
+    today = datetime.fromtimestamp(now).date()
+    per_day = {}
+    for epoch in stamps:
+        day = datetime.fromtimestamp(epoch).date()
+        per_day[day] = per_day.get(day, 0) + 1
+    days = []
+    for offset in range(PR_WINDOW_DAYS - 1, -1, -1):
+        day = today - timedelta(days=offset)
+        days.append({"label": day.strftime("%a").lower(), "count": per_day.get(day, 0)})
+
+    return {
+        "id": "prs",
+        "kind": "prs",
+        "label": "PRs Merged",
+        "sub": f"{PR_WINDOW_DAYS}d",
+        "merged_24h": merged_24h,
+        "merged_window": sum(day["count"] for day in days),
+        "days": days,
+        "last_merged_at": max(stamps) if stamps else None,
         "meters": [],
         "state": "ok",
     }
@@ -549,12 +1184,23 @@ def fetch_garmin():
     }
 
 
-PROVIDERS = [
-    ("claude", fetch_claude),
-    ("codex", fetch_codex),
-    ("garmin", fetch_garmin),
-    ("models", fetch_models),
-]
+def providers():
+    """Card order. Claude accounts come in accounts.json order."""
+    _claimed_services.clear()
+    cards = [("agents", fetch_agents)]
+    for account in claude_accounts():
+        cards.append((account["id"], (lambda acct: lambda: fetch_claude(acct))(account)))
+    cards += [
+        ("codex", fetch_codex),
+        ("garmin", fetch_garmin),
+        ("models", fetch_models),
+        ("local", fetch_local),
+        ("prs", fetch_prs),
+    ]
+    return cards
+
+
+NON_QUOTA_CARDS = ("agents", "models", "local", "garmin", "prs")
 
 
 # --- cache / lock ------------------------------------------------------------
@@ -589,12 +1235,20 @@ def stale_card(cache, card_id, state):
     if card:
         card = dict(card, state=state)
     else:
-        labels = {"claude": "Claude Code", "codex": "Codex",
-                  "garmin": "Health", "models": "Models"}
-        kinds = {"models": "models", "garmin": "health"}
-        card = {"id": card_id, "label": labels[card_id], "sub": None,
+        labels = {"agents": "Active Agents", "codex": "Codex", "garmin": "Health",
+                  "models": "Models", "local": "Local", "prs": "PRs Merged"}
+        kinds = {"agents": "agents", "models": "models", "local": "local",
+                 "garmin": "health", "prs": "prs"}
+        provider = "codex" if card_id == "codex" else None
+        for account in claude_accounts():
+            if account["id"] == card_id:
+                labels[card_id] = account["label"]
+                provider = "claude"
+        card = {"id": card_id, "label": labels.get(card_id, card_id), "sub": None,
                 "kind": kinds.get(card_id, "meters"),
-                "meters": [], "rows": [], "stats": [], "state": state}
+                "meters": [], "rows": [], "stats": [], "days": [], "state": state}
+        if provider:
+            card["provider"] = provider
     return card
 
 
@@ -641,10 +1295,18 @@ def collect(force=False, simulate=None):
 
     if not force and not simulate and cache:
         if now - cache.get("fetched_at", 0) < CACHE_TTL:
+            try:
+                agent_card = fetch_agents()
+            except Exception as exc:
+                warn(f"agents: {type(exc).__name__}")
+                agent_card = stale_card(cache, "agents", "stale")
+            cards = [card for card in cache.get("cards", []) if card.get("id") != "agents"]
+            cache = dict(cache, cards=[agent_card] + cards)
+            write_json(CACHE_FILE, cache)
             return cache
 
     cards = []
-    for card_id, fetch in PROVIDERS:
+    for card_id, fetch in providers():
         if card_id in simulate:
             cards.append(stale_card(cache, card_id, simulate[card_id]))
             continue
@@ -677,12 +1339,11 @@ def collect(force=False, simulate=None):
 
     payload = {
         "fetched_at": now,
-        # "stale" means the quota numbers may be out of date. The models card
-        # reads local logs, so its failures say nothing about quota freshness.
+        # "stale" means the quota numbers may be out of date. The models,
+        # health and PR cards read other sources entirely, so their failures say
+        # nothing about quota freshness.
         "stale": any(
-            card["state"] != "ok"
-            for card in cards
-            if card["id"] not in ("models", "garmin")
+            card["state"] != "ok" for card in cards if card["id"] not in NON_QUOTA_CARDS
         ),
         "cards": cards,
     }
@@ -697,7 +1358,8 @@ def main():
     parser.add_argument(
         "--simulate",
         help="comma list of state:card, e.g. reauth:claude,blocked:codex "
-        "(does not write the cache)",
+        "(card ids are the accounts.json ids plus codex/garmin/models/local/prs; "
+        "does not write the cache)",
     )
     args = parser.parse_args()
     payload = collect(force=args.force, simulate=parse_simulate(args.simulate))

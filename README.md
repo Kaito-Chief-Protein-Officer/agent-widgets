@@ -4,28 +4,33 @@ A desktop panel showing how much Claude Code and Codex budget is left.
 
 ```
 collect.py         fetches both APIs, writes sanitized JSON (stdlib only)
+accounts.json      which Claude logins to read (one card each); optional
 cache.json         what the panel renders. Never contains tokens/email/ids.
 lock.json          per-provider backoff state (429 / auth errors)
-models-index.json  incremental scan state for the model breakdown
+models-index.json  incremental scan state for the model and local cards
 garmin.py          fetches the Garmin health snapshot (runs under venv/)
 garmin-login.py    one-time interactive Garmin Connect sign-in
 garmin.json        latest health snapshot
 garth/             Garmin OAuth tokens, mode 700. No password is ever stored.
 venv/              python venv holding garminconnect, the only dependency
-AgentWidgets.swift the panel: borderless AppKit window at desktop-icon level
+AgentWidgets.swift the panel: borderless, freely draggable AppKit window
 agent-widgets      the compiled binary
 panel.json         placement (screen / corner / margin)
 build.sh           rebuild + restart
 ```
 
 Started at login by `~/Library/LaunchAgents/ai.boringstack.agent-widgets.plist`.
-The panel shells out to `collect.py` every 30s; the collector's own 180s TTL
-means the APIs see roughly one call every 3 minutes.
+The panel shells out to `collect.py` every 30s. The active-agent reading is
+refreshed on every poll; the collector's own 180s TTL means the APIs see
+roughly one call every 3 minutes.
 
-The window is click-through, joins all Spaces, has no Dock icon, and sits at the
-desktop-icon level — so it lives on the wallpaper and never steals focus. It is
-therefore covered by any window in front of it. Nothing here needs Screen
-Recording, Accessibility, or any other TCC permission.
+The window is freely draggable (click anywhere on the panel background and
+drag), joins all Spaces, and has no Dock icon. It floats above normal windows
+rather than sitting at desktop-icon level, so it no longer disappears behind
+whatever's in front — that's the tradeoff for being grabbable. A drag is
+persisted to `panel.json` (see "Moving the panel") so it reopens where you
+left it. Nothing here needs Screen Recording, Accessibility, or any other TCC
+permission.
 
 ## What the numbers mean
 
@@ -33,6 +38,71 @@ Neither product exposes a credit balance. Both expose **percent of a rolling
 window consumed** plus a reset time, so the panel shows **% remaining** and a
 countdown. Codex's `credits.balance` exists but is `0` on this plan and is not
 rendered.
+
+## Active local agents
+
+`ACTIVE AGENTS` is the number of live top-level Claude Code, Codex, and OpenCode
+CLI agent runtimes on this Mac, with a `CC` / `OC` / `CDX` split underneath. It
+comes from the local process table and deliberately excludes desktop renderers,
+crash handlers, Codex sandboxes, code-mode hosts, persistent app-server
+infrastructure, and OpenCode's own serve/web/mcp/management subcommands (the
+OpenCode.app desktop client's Electron helpers are also excluded — they never
+match the `opencode` executable name).
+
+The reading refreshes every 30 seconds, including while network-backed cards are
+served from cache. `0` is valid. If process inspection fails, the card shows
+`--` / `STALE` rather than reusing a count as though it were current.
+
+## Two Claude subscriptions
+
+Claude Code keeps exactly one login per config directory, so a second
+subscription (a Team seat next to a personal Max plan) is a second
+`CLAUDE_CONFIG_DIR` with its own keychain entry. `accounts.json` lists them:
+
+```json
+{
+  "claude": [
+    { "id": "claude",      "label": "personal", "config_dir": "~/.claude" },
+    { "id": "claude-team", "label": "team",     "config_dir": "~/.claude-team" }
+  ]
+}
+```
+
+Sign the second one in once, picking the team organisation when asked:
+
+```sh
+CLAUDE_CONFIG_DIR=$HOME/.claude-team claude auth login
+```
+
+Until that has happened the team dial reads `---`, wears `AUTH`, and the `CC`
+lamp lights magenta — the needs-your-hands state, not a fault in the panel.
+The first poll after the login may raise a Keychain prompt for `security`;
+answer *Always Allow* so the LaunchAgent can read it unattended.
+
+To *use* the team seat in a terminal, export the same variable before running
+`claude`; the panel only reads the tokens, it never chooses which one a
+session uses.
+
+- `id` is the card id (`--simulate reauth:claude-team` works) and `label` is
+  what the face prints. Keep labels free of email addresses: the cache is
+  meant to stay identity-free, and the label lands in it.
+- The plan tier (`max 20x`, `team`) comes from the credential block Claude
+  Code stores next to the token, not from the usage response, which has none.
+- The default directory uses keychain service `Claude Code-credentials`. Any
+  other directory gets a suffixed service name. Anthropic documents *that* but
+  not the rule, so the collector tries the obvious hash first and then any
+  suffixed `Claude Code-credentials-*` entry no other account has claimed —
+  which always resolves with one extra account. With two or more extra
+  accounts, pin each with `"keychain_service": "Claude Code-credentials-…"`
+  (find the names with `security dump-keychain | grep 'Claude Code-cred'`).
+- Without `accounts.json` the panel reads the default login exactly as before,
+  as a single full-width dial.
+
+With two accounts the hero box becomes a twin speedo — one dial per
+subscription, because "which one is nearly empty" is the question — and the
+week-windows box goes to three odometer rows: numeral left, bar filling the
+rest, bars sharing one left edge so the shapes compare down the column. The
+`CC` lamp and the `LOW` fuel light read the worst of both accounts.
 
 ## The health card (Garmin)
 
@@ -76,6 +146,9 @@ The third card ranks models by **output tokens over the last 7 days** — tokens
 the model actually generated. Total-token counts were rejected deliberately:
 they are dominated by cache reads, so one long session buries everything else.
 
+Models served from this machine are **excluded** here and get their own card;
+see below for why.
+
 Sources are the local session logs, not an API:
 
 - **Claude** — `~/.claude/projects/**/*.jsonl`, `type: "assistant"` records:
@@ -99,6 +172,9 @@ against this surface (adjacent CVD ΔE 8.4, normal-vision ΔE 19.3, contrast
 so a reshuffle in the ranking never repaints the other rows. Models past the
 top 4 fold into a grey "Other" row, which is hidden below 1%.
 
+Both cards read one index, scanned once per pass by `model_index()`, so adding
+the local card did not add a second walk over 250MB of logs.
+
 Codex's `output_tokens` already includes `reasoning_output_tokens` — verified
 against records where `total_tokens == input_tokens + output_tokens` with
 reasoning nonzero — so the two tools are counted the same way.
@@ -112,14 +188,119 @@ To re-scan from scratch (e.g. after changing the metric), delete
 session file, and entries only leave when the file does, so heavy
 worktree-per-task churn accumulates them.
 
+## Local models
+
+The fourth card answers two questions the mix cannot: **which models can run on
+this machine**, and **how many tokens they have generated**. Local tokens cost
+no subscription quota, so folding them into the mix would be the wrong reading
+twice over — a percentage of somebody else's budget, and a share that rounds to
+0% against a frontier model and vanishes into "Other".
+
+So the numbers here are **absolute counts, not shares**, and every model on disk
+gets a row whether it has ever run or not. A row with an empty track is the
+answer to "what else could I run", which is half the point of the card.
+
+Two questions, two sources, because no single one answers both:
+
+- **Which models exist, and which is resident** — the Ollama daemon, via
+  `/api/tags` and `/api/ps`. A filled lamp means resident in unified memory
+  right now; a ring means on disk only. Shape, not just colour, carries this.
+- **How many tokens they generated** — *not* Ollama. Its log records prompt-
+  cache totals and speculative-decode stats but never an output count, so
+  consumption is read from whatever drove the model:
+  - **Hermes** — `~/.hermes/logs/agent.log`, one line per call, already carrying
+    the model, provider and token counts (`API call #24: model=… provider=custom
+    in=… out=…`). It stamps **local time** while the session logs stamp UTC, so
+    the day is converted before bucketing.
+  - **Claude Code** — already scanned for the mix. `claude-local` points Claude
+    Code at Ollama, so those turns arrive with an Ollama tag as the model id and
+    simply route to this card instead.
+  - **OpenCode** — `opencode.db`, incrementally by a `time_created` high-water
+    mark rather than a byte offset. **Unproven:** the store on this machine is
+    empty (no sessions, no messages), so the parse is written to the documented
+    message shape and reads nothing until a session exists.
+
+A model counts as local when the daemon has it on disk, or when any client
+reported it against a local provider — Hermes calls its Ollama connection
+`custom`, an OpenAI-compatible base URL, not `ollama`. The union is persisted as
+`local_ids`, so attribution survives the daemon being down and a model deleted
+mid-window still explains its own tokens.
+
+Local clients keep their tallies in `local_files`, separate from the session
+logs in `files`. That is deliberate: a client that also talks to a cloud model
+can then never leak that burn into the mix, which reads `files` only.
+
+A daemon that is not answering is a **reading, not a failure** — the title rail
+says `offline`, the token history still stands, and nothing is resident. Sizes
+on disk are quoted decimally and truncated, exactly as `ollama list` quotes
+them, so the panel and the CLI never disagree about the same file; memory is
+quoted in binary units, because that is the unit RAM is sold in.
+
+Both `agent.log` and the panel survive Hermes restarting: it **recreates** its
+log on launch rather than rotating it, so `scan_log` keeps the day buckets when
+a file shrinks and only rewinds the byte offset. The tally already contributed
+is not wrong because the evidence was replaced. Session logs are append-only and
+never rewritten, so no source double-counts a day this way.
+
+## The merge card
+
+Two instruments off one source: **PRs merged in the last rolling 24 hours**, and
+a **seven-column histogram of the last seven days**. It sits under the quota
+column on purpose — the budget above it is what paid for the merges below it.
+
+One GitHub search answers both. `total_count` alone cannot, because a count
+does not split into days, so the buckets are built from the returned items:
+
+```
+GET https://api.github.com/search/issues
+    ?q=is:pr is:merged author:@me merged:>=<date>
+    &advanced_search=true&sort=updated&order=desc&per_page=100
+```
+
+- **Scope** is `PR_SCOPE` in `collect.py`, one line. It ships as `author:@me`
+  because every other instrument on this panel is personal — this account's
+  quota, this account's models, this body. `org:boringstackai` reads five times
+  higher and means team velocity instead; nothing else in the card cares.
+- **The window is queried in UTC dates but bucketed in local days**, with a
+  day of slack on the query. The columns have to be the user's days: a column
+  labelled `WED` that ran 10am Wed to 10am Thu is worse than no chart.
+- **Newest-first, capped at 3 pages.** 300 merges inside the window is far
+  above the ~9/day this account runs at, but if it ever overflows it drops the
+  *oldest* days and never the 24h figure — and it warns on stderr rather than
+  quietly reading low.
+- **Today is the last column and the only partial one**, so it is the only one
+  marked: a cursor under its weekday label, the way a cluster marks the live
+  reading. Without it the rightmost column looks like a collapse in throughput
+  every morning.
+- A day with no merges keeps its column and prints a dimmed `0`. A gap in the
+  chart is the reading; absence of a column would be missing data.
+
+The token comes from `gh auth token` — the same login `gh` already holds, so
+there is no second credential to manage and none is written to the cache.
+`PATH` is not inherited when launchd starts the panel, so the `gh` binary is
+looked up by absolute path (`GH_CANDIDATES`); `GITHUB_TOKEN` / `GH_TOKEN` win
+if set. No token means `reauth` — the `GIT` lamp lights and the instruments read
+`--`, exactly as a dead sensor does.
+
+Like the models and health cards, a GitHub failure is excluded from the
+top-level `stale` flag: that flag means "the quota numbers may be out of date,"
+and GitHub being unreachable says nothing about quota freshness.
+
+Both `GRM` and `GIT` are magenta when both need a new sign-in, and they sit
+adjacent. That is not the collision the colour rule forbids — they are the same
+*state*, and the lamp legend is what separates them. The forbidden case is a
+*level* wearing a *state* colour, which is why `LOW` is red.
+
 ## Endpoints
 
 **Claude Code** — `GET https://api.anthropic.com/api/oauth/usage`
 `Authorization: Bearer <token>` + `anthropic-beta: oauth-2025-04-20`.
-Token: Keychain service `Claude Code-credentials` → `.claudeAiOauth.accessToken`.
+Token: Keychain service `Claude Code-credentials` → `.claudeAiOauth.accessToken`
+(one call per account in `accounts.json`; see "Two Claude subscriptions").
 Claude Code refreshes that token itself, so it is read fresh every poll and
-never cached. The response has no plan/tier field — hence no subtitle on the
-Claude card. Only `five_hour` and `seven_day` are used; `seven_day_opus` and
+never cached. The response has no plan/tier field — the subtitle comes from
+`.claudeAiOauth.subscriptionType` + `rateLimitTier` in the same keychain
+blob. Only `five_hour` and `seven_day` are used; `seven_day_opus` and
 `seven_day_sonnet` are null on this account. Per-model data, if ever wanted,
 is in `limits[]` (`kind: "weekly_scoped"`, `scope.model.display_name`).
 
@@ -127,6 +308,11 @@ is in `limits[]` (`kind: "weekly_scoped"`, `scope.model.display_name`).
 `Authorization: Bearer <tokens.access_token>` **and**
 `chatgpt-account-id: <tokens.account_id>`, both from `~/.codex/auth.json`.
 Without the account-id header the endpoint returns 403.
+
+**GitHub** — `GET https://api.github.com/search/issues` (see the merge card
+above). `Authorization: Bearer <gh auth token>`. The search endpoint allows 30
+requests/minute authenticated; the collector's 180s TTL makes at most one call
+every three minutes.
 
 ## Why /usr/bin/curl and not urllib
 
@@ -169,7 +355,7 @@ tick, so the panel swaps in place with no restart:
 
 ```json
 { "theme": "hud" }        // default: 236pt portrait, translucent blur
-{ "theme": "cluster" }    // 700 × 340pt landscape JDM digital dash
+{ "theme": "cluster" }    // 700 × 604pt landscape JDM digital dash
 ```
 
 Each theme owns its own dimensions, backdrop and corner radius; `ThemeView.make`
@@ -196,16 +382,22 @@ Modelled on 80s VFD instrument clusters — the boxed hairline panels and
 cyan-teal phosphor of the Nissan/Toyota digital dashes, with the segmented bar
 gauges and blanked leading digits of a Fiat Uno Turbo.
 
-Five boxes. The left column is budget; the right side is body and model mix.
+Nine boxes in four rows. The left column is budget, then merge count; the right
+side is model mix, body, and merge history. The fourth row runs full width:
+local models are a list of named things with a size and a count each, not a
+single reading, so they get the whole width rather than a cell in the grid.
 
 | Instrument | Data | Why it earns it |
 |---|---|---|
-| Hero 7-seg + bar | Claude 5h remaining | The one figure that changes what you do in the next hour. Bar carries the same number as a shape, for when the digits are too far to read. |
+| Hero 7-seg + bar | Claude 5h remaining | The one figure that changes what you do in the next hour. Bar carries the same number as a shape, for when the digits are too far to read. Splits into a twin speedo when two accounts are signed in. |
 | Tacho ramp | 7-day model mix | Ticks-per-model *and* tick height both encode share — redundant on purpose, so the silhouette alone says whether you're mono-model or spread. Sorted descending, which is what makes a rank-ordered bar chart look like a tacho wedge. |
-| Week windows | Claude week, Codex week | Long-horizon totals, read deliberately rather than glanced — the odometer's job. |
+| Week windows | Claude week (per account), Codex week | Long-horizon totals, read deliberately rather than glanced — the odometer's job. Three rows go compact: numeral left, bar right, one shared bar edge. |
 | Vertical bar gauges | Body battery, sleep, steps | Three 0–100 tanks that drain, on one shared rail because all three share a scale. |
 | Trip-computer block | Readiness, resting HR, HRV, stress | No 0–100 scale exists, so no bar is drawn. These four **never** traffic-light: low resting HR is good and high HRV is good, so any colour rule would be backwards half the time. |
-| Warning lamps | `CC` `CDX` `GRM` per source, plus a derived `LOW` | Real clusters put failure in lamps, not in the gauges. `LOW` is the fuel light — amber at ≤20% on any quota meter, magenta at ≤8%. |
+| Trip-meter counter | PRs merged in the last 24h | Output, next to the budget that bought it. A count has no ceiling, so no bar is drawn beside it — the histogram carries the shape. |
+| Merge histogram | PRs merged per day, last 7 days | Seven segmented columns on one rail scaled to the week's own peak, so the tallest column is always full and the *shape* of the week is the reading. Exact figures print under each column, because a segment is worth more than one PR whenever the peak is above 8. |
+| Local model list | Ollama models on disk, resident state, 7-day tokens | The only list on the panel, because it is the only reading that is a set of named things rather than a number. Tracks scale to the busiest model by token count, not by rounded share, so a model with 66 tokens beside one with 115k still lights a segment. Residency rides on the lamp's *shape* — filled is in memory, a ring is on disk — since the track says nothing about it. |
+| Warning lamps | `CC` `CDX` `GRM` `GIT` per source, plus a derived `LOW` | Real clusters put failure in lamps, not in the gauges. `LOW` is the fuel light — amber at ≤20% on any quota meter, magenta at ≤8%. |
 
 Numerals are drawn as bezier paths (`SevenSegment`), not set in a font — macOS
 ships no segmented face, and paths let unlit segments stay faintly visible the
@@ -284,7 +476,16 @@ one and turns it into a blob.
 
 ## Moving the panel
 
-Edit `panel.json` — it is re-read on every 30s tick, no restart needed.
+Just drag it — click anywhere on the panel background. The new position is
+written back to `panel.json` as `x`/`y` about half a second after you let go
+(debounced so one drag is one write), and reopens there next launch.
+
+Once `x`/`y` are present they always win over `corner`/`margin`/`screen`
+below — a drag is a stronger signal than the startup default. Delete `x`/`y`
+from `panel.json` (or delete the file) to fall back to corner placement again.
+
+Corner placement is only the *first-launch* default, before you've ever
+dragged it. It's still re-read on every 30s tick, no restart needed:
 
 ```json
 { "screen": 0, "corner": "topRight", "margin": 24 }
