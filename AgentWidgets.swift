@@ -6,6 +6,7 @@
 // thing that talks to the network.
 
 import AppKit
+import Carbon.HIToolbox
 
 // MARK: - Model
 
@@ -1777,10 +1778,12 @@ final class PanelController: NSObject {
     /// Set while `reposition()` itself sets the frame, so that programmatic
     /// move doesn't get mistaken for a user drag and re-saved as one.
     private var isRepositioning = false
-    /// True while ⌥ is held and the panel is (temporarily) draggable.
+    /// True while drag mode is on and the panel is (temporarily) draggable.
     private var isInteractive = false
-    private var optionMonitorGlobal: Any?
-    private var optionMonitorLocal: Any?
+    private var hotKeyRef: EventHotKeyRef?
+    private var hotKeyHandler: EventHandlerRef?
+    /// Retitled with drag mode, and the only place the shortcut is discoverable.
+    private var dragItem: NSMenuItem?
     /// Menu bar presence. Held strongly because `NSStatusBar` does not retain
     /// its items, and an unretained one silently vanishes from the menu bar.
     private var statusItem: NSStatusItem?
@@ -1813,10 +1816,10 @@ final class PanelController: NSObject {
         // even with `ignoresMouseEvents` off — it's effectively Finder/Dock
         // territory — so dragging from rest is not possible here; (2)
         // `.normal` drags fine but then sits in the ordinary app z-order and
-        // can cover a maximized/full-screen window. `observeOptionDrag()`
-        // below is the compromise: hold ⌥ to temporarily promote the window
-        // to something that actually receives events, drag it, then it drops
-        // back to this resting state the moment ⌥ is released.
+        // can cover a maximized/full-screen window. `registerDragHotKey()`
+        // below is the compromise: ⌘⇧E promotes the window to something that
+        // actually receives events, you drag it, and a second ⌘⇧E drops it
+        // back to this resting state.
         window.ignoresMouseEvents = true
         window.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopIconWindow)))
         window.isMovableByWindowBackground = true
@@ -1834,28 +1837,46 @@ final class PanelController: NSObject {
         NotificationCenter.default.addObserver(
             forName: NSWindow.didMoveNotification,
             object: window, queue: .main) { [weak self] _ in self?.handleUserMove() }
-        observeOptionDrag()
+        registerDragHotKey()
     }
 
-    /// ⌥ is a modifier-only signal (no keystroke content), so — unlike full
-    /// key monitoring — this does not need Accessibility/Input Monitoring
-    /// permission on any macOS version tested. Both a global and a local
-    /// monitor are registered because a global-only monitor never fires for
-    /// events that land while this app itself is the focused/key app.
-    private func observeOptionDrag() {
-        let handle: (NSEvent) -> Void = { [weak self] event in
-            self?.setInteractive(event.modifierFlags.contains(.option))
-        }
-        optionMonitorGlobal = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged, handler: handle)
-        optionMonitorLocal = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { event in
-            handle(event)
-            return event
+    /// ⌘⇧E toggles drag mode. Carbon's `RegisterEventHotKey` rather than an
+    /// `NSEvent` global monitor because a global monitor for real keystrokes
+    /// (as opposed to bare modifiers) needs an Accessibility/Input Monitoring
+    /// grant and silently no-ops until it gets one — awkward for a bare
+    /// launchd binary. The tradeoff is that this claims the combination
+    /// system-wide: while the panel runs, ⌘⇧E no longer reaches other apps.
+    private func registerDragHotKey() {
+        var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
+                                      eventKind: UInt32(kEventHotKeyPressed))
+        // Non-capturing so it can become a C function pointer; `self` travels
+        // through userData instead. Carbon delivers this on the main thread.
+        InstallEventHandler(GetApplicationEventTarget(), { _, _, context -> OSStatus in
+            guard let context else { return OSStatus(eventNotHandledErr) }
+            let controller = Unmanaged<PanelController>.fromOpaque(context).takeUnretainedValue()
+            controller.setInteractive(!controller.isInteractive)
+            return noErr
+        }, 1, &eventType, Unmanaged.passUnretained(self).toOpaque(), &hotKeyHandler)
+
+        var ref: EventHotKeyRef?
+        let id = EventHotKeyID(signature: OSType(0x41_47_57_54), id: 1)  // 'AGWT'
+        let status = RegisterEventHotKey(UInt32(kVK_ANSI_E), UInt32(cmdKey | shiftKey), id,
+                                         GetApplicationEventTarget(), 0, &ref)
+        hotKeyRef = ref
+        // -9878 is eventHotKeyExistsErr: something else already owns ⌘⇧E, and
+        // the shortcut would otherwise just be silently dead.
+        if status != noErr {
+            FileHandle.standardError.write(
+                "agent-widgets: ⌘⇧E unavailable (OSStatus \(status)); drag via the menu bar instead\n"
+                    .data(using: .utf8)!)
         }
     }
 
-    /// Promotes the window to `.floating` (a level dragging is guaranteed to
-    /// work on) for exactly as long as ⌥ is held, then demotes it straight
-    /// back to the inert desktop-icon resting state.
+    /// Drag mode. On, the window sits at `.floating` — a level dragging is
+    /// guaranteed to work on — and accepts the mouse; off, it drops straight
+    /// back to the inert click-through desktop-icon resting state. A discrete
+    /// shortcut means this is a toggle rather than the old hold-to-drag: press
+    /// once to unlock, drag, press again to put it back down.
     private func setInteractive(_ interactive: Bool) {
         guard interactive != isInteractive else { return }
         isInteractive = interactive
@@ -1866,6 +1887,11 @@ final class PanelController: NSObject {
             window.ignoresMouseEvents = true
             window.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopIconWindow)))
         }
+        dragItem?.title = interactive ? "Lock in Place (⌘⇧E)" : "Unlock for Dragging (⌘⇧E)"
+    }
+
+    @objc private func toggleDragMode() {
+        setInteractive(!isInteractive)
     }
 
     // MARK: - Menu bar
@@ -1880,6 +1906,10 @@ final class PanelController: NSObject {
         item.button?.image = icon
 
         let menu = NSMenu()
+        let drag = NSMenuItem(title: "Unlock for Dragging (⌘⇧E)",
+                              action: #selector(toggleDragMode), keyEquivalent: "")
+        drag.target = self
+        menu.addItem(drag)
         let toggle = NSMenuItem(title: "Hide Panel", action: #selector(togglePanel), keyEquivalent: "")
         toggle.target = self
         menu.addItem(toggle)
@@ -1891,6 +1921,7 @@ final class PanelController: NSObject {
 
         statusItem = item
         toggleItem = toggle
+        dragItem = drag
     }
 
     /// Ordering out leaves the refresh timer running, so a panel that has been

@@ -26,7 +26,8 @@ roughly one call every 3 minutes.
 
 ## Menu bar
 
-A speedometer icon in the menu bar carries **Hide/Show Panel** and **Quit**.
+A speedometer icon in the menu bar carries **Unlock for Dragging** (the ⌘⇧E
+toggle), **Hide/Show Panel** and **Quit**.
 Because the panel is click-through and the app is `.accessory` — no window
 chrome, no Dock icon, no menu of its own — that icon is the only way to reach
 it short of `launchctl` or Activity Monitor.
@@ -48,16 +49,22 @@ rest: desktop-icon level is effectively Finder/Dock territory and a
 third-party window placed there never reliably receives mouseDown no matter
 what `ignoresMouseEvents` says.
 
-**Hold ⌥ (Option) and drag** to move it anyway. Holding ⌥ promotes the window
-to `.floating` — a level dragging is guaranteed to work on — for as long as
-the key is held, then it drops straight back to the click-through
-desktop-icon resting state the moment you release ⌥. The new position is
-persisted to `panel.json` (see "Moving the panel") so it reopens where you
-left it. ⌥ is tracked as a modifier only (no keystroke content is read), so
-this does not need Screen Recording, Accessibility, or Input Monitoring
-permission on any macOS version tested — but do check it actually fires on
-your machine, since global modifier monitoring has shifted permission
-requirements across macOS releases before.
+**Press ⌘⇧E to unlock it for dragging**, drag it anywhere, then press ⌘⇧E
+again to put it back down. Unlocking promotes the window to `.floating` — a
+level dragging is guaranteed to work on — and re-locking drops it straight
+back to the click-through desktop-icon resting state. The same toggle is in
+the menu bar menu. The new position is persisted to `panel.json` (see "Moving
+the panel") so it reopens where you left it.
+
+The shortcut is a Carbon `RegisterEventHotKey`, not an `NSEvent` global
+monitor: a global monitor for real keystrokes (as opposed to bare modifiers)
+needs an Accessibility/Input Monitoring grant and silently does nothing until
+it gets one, which is awkward for a bare launchd binary. So nothing here needs
+Screen Recording, Accessibility, or any other TCC permission — but the
+tradeoff is that the hotkey is **claimed system-wide**: while the panel runs,
+⌘⇧E no longer reaches other apps (notably VS Code's *Show Explorer*). If
+something else already owns it, registration fails with `eventHotKeyExistsErr`
+and says so in `panel.log` rather than leaving a silently dead shortcut.
 
 ## What the numbers mean
 
@@ -503,9 +510,9 @@ one and turns it into a blob.
 
 ## Moving the panel
 
-Hold ⌥ and drag anywhere on the panel background. The new position is
-written back to `panel.json` as `x`/`y` about half a second after you let go
-(debounced so one drag is one write), and reopens there next launch.
+Press ⌘⇧E, drag anywhere on the panel background, press ⌘⇧E again. The new
+position is written back to `panel.json` as `x`/`y` about half a second after
+you let go (debounced so one drag is one write), and reopens there next launch.
 
 Once `x`/`y` are present they always win over `corner`/`margin`/`screen`
 below — a drag is a stronger signal than the startup default. Delete `x`/`y`
