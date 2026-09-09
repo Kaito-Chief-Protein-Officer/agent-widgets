@@ -1792,18 +1792,22 @@ final class PanelController {
         window.isOpaque = false
         window.backgroundColor = .clear
         window.hasShadow = true
-        // Stays at desktop-icon level — behind normal app windows, exactly
-        // like before — so it still reads as part of the desktop rather than
-        // floating over whatever you're working in. `ignoresMouseEvents` was
-        // the only thing actually blocking dragging (a level below normal
-        // windows doesn't prevent clicks landing on it wherever it's not
-        // covered by something in front, same as dragging a Finder desktop
-        // icon). `isMovableByWindowBackground` means clicking anywhere on the
+        // Desktop-icon level turned out not to work for this: that tier is
+        // effectively owned by Finder/the Dock for real desktop icons, and a
+        // third-party window placed there never reliably receives mouseDown
+        // for dragging no matter what `ignoresMouseEvents`/
+        // `isMovableByWindowBackground` say (confirmed live — the panel sat
+        // there correctly but simply would not drag). `.normal` is the tier
+        // actual app windows use, where dragging is guaranteed to work: it
+        // now behaves like any other window on screen — click it and it
+        // comes forward and drags, click into another app and it recedes
+        // behind that app's windows like an unfocused window normally does.
+        // `isMovableByWindowBackground` means clicking anywhere on the
         // (otherwise control-free) panel drags it — no custom mouse handling
         // needed.
-        window.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopIconWindow)))
+        window.level = .normal
         window.isMovableByWindowBackground = true
-        window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
+        window.collectionBehavior = [.canJoinAllSpaces, .ignoresCycle]
 
         window.contentView = Self.chrome(for: panel)
         window.orderFrontRegardless()
