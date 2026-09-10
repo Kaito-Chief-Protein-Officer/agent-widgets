@@ -97,27 +97,29 @@ subscription (a Team seat next to a personal Max plan) is a second
 {
   "claude": [
     { "id": "claude",      "label": "personal", "config_dir": "~/.claude" },
-    { "id": "claude-team", "label": "team",     "config_dir": "~/.claude-team" }
+    { "id": "claude-work", "label": "work",     "config_dir": "~/.claude-enterprise" }
   ]
 }
 ```
 
-Sign the second one in once, picking the team organisation when asked:
+Sign the second one in once, picking the work organisation when asked:
 
 ```sh
-CLAUDE_CONFIG_DIR=$HOME/.claude-team claude auth login
+CLAUDE_CONFIG_DIR=$HOME/.claude-enterprise claude auth login
 ```
 
-Until that has happened the team dial reads `---`, wears `AUTH`, and the `CC`
+Until that has happened the work dial reads `---`, wears `AUTH`, and the `CC`
 lamp lights magenta — the needs-your-hands state, not a fault in the panel.
+`CLAUDE_CONFIG_DIR=$HOME/.claude-enterprise claude auth status` reports
+`loggedIn`, which separates a logged-out profile from a misconfigured one.
 The first poll after the login may raise a Keychain prompt for `security`;
 answer *Always Allow* so the LaunchAgent can read it unattended.
 
-To *use* the team seat in a terminal, export the same variable before running
+To *use* the work seat in a terminal, export the same variable before running
 `claude`; the panel only reads the tokens, it never chooses which one a
 session uses.
 
-- `id` is the card id (`--simulate reauth:claude-team` works) and `label` is
+- `id` is the card id (`--simulate reauth:claude-work` works) and `label` is
   what the face prints. Keep labels free of email addresses: the cache is
   meant to stay identity-free, and the label lands in it.
 - The plan tier (`max 20x`, `team`) comes from the credential block Claude

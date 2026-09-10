@@ -1,6 +1,6 @@
 {
   "claude": [
-    { "id": "claude", "label": "personal", "config_dir": "~/.claude" },
-    { "id": "claude-team", "label": "team", "config_dir": "~/.claude-team" }
+    { "id": "claude",      "label": "personal", "config_dir": "~/.claude" },
+    { "id": "claude-work", "label": "work",     "config_dir": "~/.claude-enterprise" }
   ]
 }
