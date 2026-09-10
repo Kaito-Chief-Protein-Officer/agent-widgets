@@ -26,8 +26,11 @@ roughly one call every 3 minutes.
 
 ## Menu bar
 
-A speedometer icon in the menu bar carries **Unlock for Dragging** (the ⌘⇧E
-toggle), **Hide/Show Panel** and **Quit**.
+**Click the speedometer icon** in the menu bar to open the panel in a popover.
+The desktop panel lives on the wallpaper, so it is invisible whenever a window
+covers it; the popover is the same widget rendered from the same snapshot, and
+it stays live while open. **Right-click (or ⌃-click)** the icon for the menu:
+**Unlock for Dragging** (the ⌘⇧E toggle), **Hide/Show Panel** and **Quit**.
 Because the panel is click-through and the app is `.accessory` — no window
 chrome, no Dock icon, no menu of its own — that icon is the only way to reach
 it short of `launchctl` or Activity Monitor.
@@ -516,9 +519,18 @@ Press ⌘⇧E, drag anywhere on the panel background, press ⌘⇧E again. The n
 position is written back to `panel.json` as `x`/`y` about half a second after
 you let go (debounced so one drag is one write), and reopens there next launch.
 
-Once `x`/`y` are present they always win over `corner`/`margin`/`screen`
-below — a drag is a stronger signal than the startup default. Delete `x`/`y`
-from `panel.json` (or delete the file) to fall back to corner placement again.
+Once `x`/`y` are present they win over `corner`/`margin`/`screen` below — a
+drag is a stronger signal than the startup default. Delete `x`/`y` from
+`panel.json` (or delete the file) to fall back to corner placement again.
+
+**Changing monitors discards them**, because a position chosen on a display
+that is no longer attached puts the panel somewhere you can neither see nor
+grab. Two checks cover it: the set of attached displays is compared by display
+ID on every `didChangeScreenParameters` (so a resolution tweak is *not* treated
+as a monitor change and keeps your position), and a saved origin whose panel
+centre lands on no screen is dropped on the next reposition — which catches a
+monitor swapped while the panel was not running, where there is no
+notification to observe. Either way it returns to corner placement.
 
 Corner placement is only the *first-launch* default, before you've ever
 dragged it. It's still re-read on every 30s tick, no restart needed:

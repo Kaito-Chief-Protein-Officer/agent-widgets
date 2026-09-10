@@ -1784,6 +1784,16 @@ final class PanelController: NSObject {
     private var hotKeyHandler: EventHandlerRef?
     /// Retitled with drag mode, and the only place the shortcut is discoverable.
     private var dragItem: NSMenuItem?
+    /// Which displays were attached last time the screen setup changed.
+    private var lastDisplaySignature = PanelController.displaySignature()
+    /// Held rather than assigned to `statusItem.menu`: assigning it makes the
+    /// menu swallow the click before any action can run, which would leave no
+    /// way to open the popover.
+    private var statusMenu: NSMenu?
+    private var popover: NSPopover?
+    /// A second view of the same snapshot, so the popover can render the panel
+    /// without disturbing the one on the desktop.
+    private var popoverPanel: ThemeView?
     /// Menu bar presence. Held strongly because `NSStatusBar` does not retain
     /// its items, and an unretained one silently vanishes from the menu bar.
     private var statusItem: NSStatusItem?
@@ -1833,7 +1843,7 @@ final class PanelController: NSObject {
 
         NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
-            object: nil, queue: .main) { [weak self] _ in self?.reposition() }
+            object: nil, queue: .main) { [weak self] _ in self?.handleScreenChange() }
         NotificationCenter.default.addObserver(
             forName: NSWindow.didMoveNotification,
             object: window, queue: .main) { [weak self] _ in self?.handleUserMove() }
@@ -1917,11 +1927,68 @@ final class PanelController: NSObject {
         let quit = NSMenuItem(title: "Quit", action: #selector(quitPanel), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
-        item.menu = menu
+
+        item.button?.target = self
+        item.button?.action = #selector(statusButtonClicked)
+        item.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
 
         statusItem = item
+        statusMenu = menu
         toggleItem = toggle
         dragItem = drag
+    }
+
+    /// Left click peeks at the panel in a popover; right click (or ⌃-click)
+    /// opens the menu. The menu is attached only for as long as it takes to
+    /// pop, then detached so the next left click reaches the action again.
+    @objc private func statusButtonClicked() {
+        let event = NSApp.currentEvent
+        let wantsMenu = event?.type == .rightMouseUp
+            || event?.modifierFlags.contains(.control) == true
+        guard wantsMenu, let item = statusItem else {
+            togglePopover()
+            return
+        }
+        item.menu = statusMenu
+        item.button?.performClick(nil)
+        item.menu = nil
+    }
+
+    /// The desktop panel is on the wallpaper, so it is invisible whenever a
+    /// window covers it. This is the same widget, rendered from the same
+    /// snapshot, reachable from the menu bar regardless of what is in front.
+    private func togglePopover() {
+        guard let button = statusItem?.button else { return }
+        if let popover, popover.isShown {
+            popover.performClose(nil)
+            return
+        }
+
+        let view = popoverPanel ?? ThemeView.make(config.theme)
+        popoverPanel = view
+        view.snapshot = panel.snapshot
+        let size = NSSize(width: view.panelWidth, height: view.fittingHeight)
+
+        let shown: NSPopover
+        if let popover {
+            shown = popover
+        } else {
+            shown = NSPopover()
+            shown.behavior = .transient
+            // The panel's palette is near-white on near-black; the default
+            // popover material would flip light and render it unreadable.
+            shown.appearance = NSAppearance(named: .darkAqua)
+            let host = NSViewController()
+            let content = Self.chrome(for: view)
+            content.frame = NSRect(origin: .zero, size: size)
+            host.view = content
+            shown.contentViewController = host
+            popover = shown
+        }
+        shown.contentSize = size
+
+        NSApp.activate(ignoringOtherApps: true)
+        shown.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
     }
 
     /// Ordering out leaves the refresh timer running, so a panel that has been
@@ -1942,6 +2009,60 @@ final class PanelController: NSObject {
     /// being restarted a second later.
     @objc private func quitPanel() {
         NSApp.terminate(nil)
+    }
+
+    /// The attached displays, identified by display ID rather than by frame:
+    /// changing resolution is not the same as changing monitors, and should
+    /// not cost you a position you chose deliberately.
+    private static func displaySignature() -> String {
+        NSScreen.screens
+            .map {
+                ($0.deviceDescription[NSDeviceDescriptionKey(rawValue: "NSScreenNumber")] as? NSNumber)?
+                    .stringValue ?? "?"
+            }
+            .sorted()
+            .joined(separator: ",")
+    }
+
+    /// `didChangeScreenParameters` fires for everything from a resolution tweak
+    /// to undocking. Only a change in the display set invalidates a dragged
+    /// position: coordinates chosen on a monitor that is no longer attached
+    /// leave the panel somewhere you cannot see or reach it. So drop them and
+    /// let corner placement take over — the position it had before you ever
+    /// dragged it.
+    private func handleScreenChange() {
+        let signature = Self.displaySignature()
+        if signature != lastDisplaySignature {
+            lastDisplaySignature = signature
+            clearSavedOrigin()
+        }
+        reposition()
+    }
+
+    /// Catches what the signature check cannot: a monitor swapped while the
+    /// panel was not running has no notification to observe, so a saved origin
+    /// is also validated against the displays actually present. Judged by the
+    /// panel's centre — if that is on a screen, it can be seen and grabbed.
+    private func discardOffscreenOrigin() {
+        guard let x = config.x, let y = config.y else { return }
+        let centre = NSPoint(x: x + window.frame.width / 2, y: y + window.frame.height / 2)
+        if !NSScreen.screens.contains(where: { $0.visibleFrame.contains(centre) }) {
+            clearSavedOrigin()
+        }
+    }
+
+    /// Forgets a dragged position, in memory and on disk. Synthesized encoding
+    /// omits nil optionals, so this drops the keys rather than writing nulls,
+    /// and `origin(in:size:)` falls through to corner placement again.
+    private func clearSavedOrigin() {
+        var updated = PanelConfig.load(configPath)
+        guard updated.x != nil || updated.y != nil else { return }
+        updated.x = nil
+        updated.y = nil
+        config = updated
+        if let data = try? JSONEncoder().encode(updated) {
+            try? data.write(to: URL(fileURLWithPath: configPath))
+        }
     }
 
     /// A drag just ended (or is still in flight — dragging fires many of
@@ -1984,6 +2105,10 @@ final class PanelController: NSObject {
                 self.config = PanelConfig.load(self.configPath)
                 self.applyTheme()
                 self.panel.snapshot = snapshot
+                self.popoverPanel?.snapshot = snapshot
+                if let popover = self.popover, popover.isShown, let view = self.popoverPanel {
+                    popover.contentSize = NSSize(width: view.panelWidth, height: view.fittingHeight)
+                }
                 self.resize()
             }
         }
@@ -2056,6 +2181,7 @@ final class PanelController: NSObject {
 
     private func reposition() {
         guard let screen = config.targetScreen() else { return }
+        discardOffscreenOrigin()
         // Guarded so this programmatic move (corner default, or reapplying a
         // saved drag after a resize) is never mistaken by `handleUserMove`
         // for a fresh drag and rewritten as one.
