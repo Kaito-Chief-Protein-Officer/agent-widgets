@@ -43,7 +43,12 @@ DEFAULT_CLAUDE_ACCOUNTS = [
 ]
 
 CODEX_URL = "https://chatgpt.com/backend-api/codex/usage"
-CODEX_AUTH_FILE = os.path.expanduser("~/.codex/auth.json")
+# Codex keeps one login per CODEX_HOME, the same shape as Claude Code's
+# per-config-dir logins, so a second ChatGPT account is a second home dir.
+DEFAULT_CODEX_HOME = "~/.codex"
+DEFAULT_CODEX_ACCOUNTS = [
+    {"id": "codex", "label": "Codex", "codex_home": DEFAULT_CODEX_HOME}
+]
 PS = "/bin/ps"
 
 
@@ -246,9 +251,37 @@ def claude_plan(oauth):
     return plan or None
 
 
-def codex_credentials():
+def codex_accounts():
+    """Codex logins from accounts.json, validated; the default one if absent.
+
+    Each entry: {"id", "label", "codex_home"}. Mirrors claude_accounts() —
+    same id/label rules, and the id is the card id so `--simulate` can name it.
+    """
+    config = read_json(ACCOUNTS_FILE) or {}
+    accounts = []
+    seen = set()
+    for raw in config.get("codex") or []:
+        if not isinstance(raw, dict):
+            continue
+        account_id = str(raw.get("id") or "").strip()
+        if not account_id or account_id in seen or ":" in account_id:
+            continue
+        seen.add(account_id)
+        accounts.append(
+            {
+                "id": account_id,
+                "label": str(raw.get("label") or account_id),
+                "codex_home": str(raw.get("codex_home") or DEFAULT_CODEX_HOME),
+            }
+        )
+    return accounts or [dict(account) for account in DEFAULT_CODEX_ACCOUNTS]
+
+
+def codex_credentials(account):
+    """-> (access token, ChatGPT account id) for one login, or (None, None)."""
+    path = os.path.join(os.path.expanduser(account["codex_home"]), "auth.json")
     try:
-        with open(CODEX_AUTH_FILE) as handle:
+        with open(path) as handle:
             tokens = json.load(handle).get("tokens", {})
         return tokens.get("access_token"), tokens.get("account_id")
     except Exception:
@@ -307,8 +340,8 @@ def fetch_claude(account):
     }
 
 
-def fetch_codex():
-    token, account_id = codex_credentials()
+def fetch_codex(account):
+    token, account_id = codex_credentials(account)
     if not token or not account_id:
         raise HttpError(401)
     data = get_json(
@@ -339,9 +372,9 @@ def fetch_codex():
         )
     plan = data.get("plan_type")
     return {
-        "id": "codex",
+        "id": account["id"],
         "provider": "codex",
-        "label": "Codex",
+        "label": account["label"],
         "sub": str(plan) if plan else None,
         "kind": "meters",
         "meters": meters,
@@ -1185,13 +1218,14 @@ def fetch_garmin():
 
 
 def providers():
-    """Card order. Claude accounts come in accounts.json order."""
+    """Card order. Claude then Codex accounts, in accounts.json order."""
     _claimed_services.clear()
     cards = [("agents", fetch_agents)]
     for account in claude_accounts():
         cards.append((account["id"], (lambda acct: lambda: fetch_claude(acct))(account)))
+    for account in codex_accounts():
+        cards.append((account["id"], (lambda acct: lambda: fetch_codex(acct))(account)))
     cards += [
-        ("codex", fetch_codex),
         ("garmin", fetch_garmin),
         ("models", fetch_models),
         ("local", fetch_local),
@@ -1239,11 +1273,15 @@ def stale_card(cache, card_id, state):
                   "models": "Models", "local": "Local", "prs": "PRs Merged"}
         kinds = {"agents": "agents", "models": "models", "local": "local",
                  "garmin": "health", "prs": "prs"}
-        provider = "codex" if card_id == "codex" else None
+        provider = None
         for account in claude_accounts():
             if account["id"] == card_id:
                 labels[card_id] = account["label"]
                 provider = "claude"
+        for account in codex_accounts():
+            if account["id"] == card_id:
+                labels[card_id] = account["label"]
+                provider = "codex"
         card = {"id": card_id, "label": labels.get(card_id, card_id), "sub": None,
                 "kind": kinds.get(card_id, "meters"),
                 "meters": [], "rows": [], "stats": [], "days": [], "state": state}

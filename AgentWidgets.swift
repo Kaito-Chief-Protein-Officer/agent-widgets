@@ -1362,12 +1362,17 @@ final class ClusterView: ThemeView {
         title("week windows", in: box, dim: 1)
 
         let claude = snapshot.cards(provider: "claude")
-        let codex = snapshot.card("codex")
+        let codex = snapshot.cards(provider: "codex")
         var rows: [(String, Card?, Meter?, String?)] = claude.map { card in
             (claude.count > 1 ? "claude · \(card.label)" : "claude · week",
              card, card.meters.first { $0.name == "week" }, nil)
         }
-        rows.append(("codex · week", codex, snapshot.meter("codex", "week"), codex?.sub))
+        // With one Codex login the plan name has room to ride along, the way it
+        // always has; with two, the account label needs that slot instead.
+        rows += codex.map { card in
+            (codex.count > 1 ? "codex · \(card.label)" : "codex · week",
+             card, card.meters.first { $0.name == "week" }, codex.count > 1 ? nil : card.sub)
+        }
         if rows.count > 2 {
             drawQuotaRows(rows, in: box)
             return
@@ -1736,7 +1741,7 @@ final class ClusterView: ThemeView {
         let low: NSColor? = lowest.map { $0 <= 8 ? VFD.red : ($0 <= 20 ? VFD.amber : nil) } ?? nil
 
         let lamps: [(String, NSColor?)] = [
-            ("cc", colour(claude)), ("cdx", colour([snapshot.card("codex")])),
+            ("cc", colour(claude)), ("cdx", colour(snapshot.cards(provider: "codex"))),
             ("grm", colour([snapshot.card("garmin")])), ("git", colour([snapshot.card("prs")])),
             ("low", low),
         ]

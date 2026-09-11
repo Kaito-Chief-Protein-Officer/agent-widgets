@@ -4,7 +4,7 @@ A desktop panel showing how much Claude Code and Codex budget is left.
 
 ```
 collect.py         fetches both APIs, writes sanitized JSON (stdlib only)
-accounts.json      which Claude logins to read (one card each); optional
+accounts.json      which Claude/Codex logins to read (one card each); optional
 cache.json         what the panel renders. Never contains tokens/email/ids.
 lock.json          per-provider backoff state (429 / auth errors)
 models-index.json  incremental scan state for the model and local cards
@@ -142,6 +142,39 @@ subscription, because "which one is nearly empty" is the question — and the
 week-windows box goes to three odometer rows: numeral left, bar filling the
 rest, bars sharing one left edge so the shapes compare down the column. The
 `CC` lamp and the `LOW` fuel light read the worst of both accounts.
+
+## Two OpenAI accounts
+
+Codex works the same way as Claude Code: one login per home directory, keyed by
+`CODEX_HOME` rather than `CLAUDE_CONFIG_DIR`. `codex login` overwrites
+`$CODEX_HOME/auth.json`, so a second ChatGPT account is a second home dir —
+there is no account switcher to read.
+
+Create the second one, then list both in `accounts.json`:
+
+```sh
+CODEX_HOME=$HOME/.codex-work codex login
+CODEX_HOME=$HOME/.codex-work codex login status   # confirms which account it took
+```
+
+```json
+{
+  "codex": [
+    { "id": "codex",      "label": "personal", "codex_home": "~/.codex" },
+    { "id": "codex-work", "label": "work",     "codex_home": "~/.codex-work" }
+  ]
+}
+```
+
+`id`, `label` and the `--simulate` rules are the same as the Claude block above,
+and `codex_home` defaults to `~/.codex`. Without a `codex` block the panel reads
+the single default login exactly as before, as one `codex · week` row carrying
+the plan name. With two, each row is labelled by account instead, because the
+label needs the slot the plan name was using.
+
+To *use* the second account in a terminal, export the same variable before
+running `codex`; the panel only reads the tokens, it never chooses which one a
+session uses.
 
 ## The health card (Garmin)
 
