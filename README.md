@@ -10,6 +10,7 @@ lock.json          per-provider backoff state (429 / auth errors)
 models-index.json  incremental scan state for the model and local cards
 garmin.py          fetches the Garmin health snapshot (runs under venv/)
 garmin-login.py    one-time interactive Garmin Connect sign-in
+add-codex-account.py  one-time interactive second Codex sign-in + wiring
 garmin.json        latest health snapshot
 garth/             Garmin OAuth tokens, mode 700. No password is ever stored.
 venv/              python venv holding garminconnect, the only dependency
@@ -150,11 +151,29 @@ Codex works the same way as Claude Code: one login per home directory, keyed by
 `$CODEX_HOME/auth.json`, so a second ChatGPT account is a second home dir —
 there is no account switcher to read.
 
-Create the second one, then list both in `accounts.json`:
+`add-codex-account.py` does the whole thing:
+
+```sh
+~/.config/agent-widgets/add-codex-account.py              # ~/.codex-work, labelled "work"
+~/.config/agent-widgets/add-codex-account.py --home ~/.codex-alt --label alt
+```
+
+It prints which account each home already holds, runs the login, verifies the
+result, writes `accounts.json` and asks the collector for both cards as proof.
+Re-running is safe — a home that is already signed in is left alone and only
+the wiring is redone.
+
+Two things it refuses, because both produce a panel that looks broken later:
+signing the second home in as the *same* account as the first (two identical
+cards), and an API-key login — `codex login --with-api-key` stores no ChatGPT
+access token or account id, which is what the usage endpoint reads, so the card
+would sit on `AUTH` forever.
+
+The equivalent by hand:
 
 ```sh
 CODEX_HOME=$HOME/.codex-work codex login
-CODEX_HOME=$HOME/.codex-work codex login status   # confirms which account it took
+CODEX_HOME=$HOME/.codex-work codex login status   # only says *that* a login exists
 ```
 
 ```json
