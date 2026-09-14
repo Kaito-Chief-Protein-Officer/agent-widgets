@@ -506,20 +506,121 @@ def memory_usage():
     return used, total
 
 
+NET_SAMPLE_FILE = os.path.join(CONFIG_DIR, "net-sample.json")
+PING_HOST = "1.1.1.1"
+
+
+def ping_ms():
+    """Round trip to a fixed resolver, or None when it does not answer.
+
+    A fixed IP rather than a hostname on purpose: resolving one would fold DNS
+    latency into a number meant to describe the link.
+    """
+    try:
+        out = subprocess.run(["/sbin/ping", "-c", "1", "-W", "1500", PING_HOST],
+                             capture_output=True, text=True, timeout=4).stdout
+    except Exception:
+        return None
+    match = re.search(r"time=([\d.]+) ms", out)
+    return int(round(float(match.group(1)))) if match else None
+
+
+def net_rates():
+    """-> (down bytes/s, up bytes/s) since the previous poll, or (None, None).
+
+    Interface byte counters differenced across ticks, which costs nothing and
+    describes real traffic. A speed test would have to move real data to answer
+    the same question, every 30 seconds, forever.
+    """
+    try:
+        out = subprocess.run(["/usr/sbin/netstat", "-ib"], capture_output=True,
+                             text=True, timeout=5).stdout
+    except Exception:
+        return None, None
+    seen, inbound, outbound = set(), 0, 0
+    for line in out.splitlines()[1:]:
+        fields = line.split()
+        # One row per address family per interface; count each interface once,
+        # and skip loopback so local traffic is not reported as link traffic.
+        if len(fields) > 10 and fields[0] not in seen and not fields[0].startswith("lo"):
+            seen.add(fields[0])
+            try:
+                inbound += int(fields[6])
+                outbound += int(fields[9])
+            except ValueError:
+                continue
+
+    now = time.time()
+    previous = read_json(NET_SAMPLE_FILE) or {}
+    sample = {"at": now, "in": inbound, "out": outbound}
+    try:
+        with open(NET_SAMPLE_FILE, "w") as handle:
+            json.dump(sample, handle)
+    except Exception:
+        pass
+
+    elapsed = now - (previous.get("at") or 0)
+    # Counters reset on reboot or an interface bounce, and a stale sample makes
+    # an average over hours rather than a current rate.
+    if not previous or elapsed <= 0 or elapsed > 600:
+        return None, None
+    down = inbound - (previous.get("in") or 0)
+    up = outbound - (previous.get("out") or 0)
+    if down < 0 or up < 0:
+        return None, None
+    return down / elapsed, up / elapsed
+
+
+def swap_usage():
+    """-> (used bytes, total bytes) from vm.swapusage."""
+    try:
+        out = subprocess.run(["/usr/sbin/sysctl", "-n", "vm.swapusage"],
+                             capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return 0, 0
+    def field(name):
+        match = re.search(rf"{name} = ([\d.]+)M", out)
+        return int(float(match.group(1)) * (1 << 20)) if match else 0
+    return field("used"), field("total")
+
+
+def compact_rate(value):
+    if value is None:
+        return None
+    if value >= 1 << 20:
+        return f"{value / (1 << 20):.1f}M"
+    return f"{value / 1024:.0f}K"
+
+
 def fetch_system():
     used, total = memory_usage()
+    swap_used, swap_total = swap_usage()
+    down, up = net_rates()
     cores = os.cpu_count() or 1
+    stats = [
+        {"label": "cpu", "value": str(cpu_percent())},
+        {"label": "ram", "value": str(int(round(100 * used / total)) if total else 0)},
+        {"label": "ram_used", "value": compact_bytes(used)},
+        {"label": "ram_total", "value": compact_bytes(total)},
+    ]
+    if swap_total:
+        stats += [
+            {"label": "swap", "value": str(int(round(100 * swap_used / swap_total)))},
+            {"label": "swap_used", "value": compact_bytes(swap_used)},
+            {"label": "swap_total", "value": compact_bytes(swap_total)},
+        ]
+    latency = ping_ms()
+    if latency is not None:
+        stats.append({"label": "ping", "value": str(latency)})
+    for name, rate in (("net_down", down), ("net_up", up)):
+        if compact_rate(rate):
+            stats.append({"label": name, "value": compact_rate(rate)})
     return {
         "id": "system",
         "kind": "system",
         "label": "System",
         "sub": f"{cores} cores",
-        "stats": [
-            {"label": "cpu", "value": str(cpu_percent())},
-            {"label": "ram", "value": str(int(round(100 * used / total)) if total else 0)},
-            {"label": "ram_used", "value": compact_bytes(used)},
-            {"label": "ram_total", "value": compact_bytes(total)},
-        ],
+        "stats": stats,
         "meters": [],
         "state": "ok",
     }

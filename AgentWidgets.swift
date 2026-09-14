@@ -1788,16 +1788,17 @@ final class ClusterView: ThemeView {
         }
     }
 
-    /// The machine row: CPU on a round dial, RAM on the wedge tacho.
+    /// The machine row: a dial at each end, compact bars between them.
     ///
-    /// Two gauges, two shapes, because they answer different questions. CPU is
-    /// the twitchy one you read at a glance — a needle's angle registers
-    /// before any number does — so it gets the dial. RAM moves slowly and what
-    /// matters is how much of the tank is gone, which is what a wedge shows.
+    /// CPU and ping are the twitchy ones — a needle's angle registers before a
+    /// number does — and they bracket the row so it reads as a cluster rather
+    /// than a list. RAM and swap change slowly and only need to answer "how
+    /// much is gone", which a bar does in a fraction of the space the wedge
+    /// was taking.
     private func drawSystem(_ snapshot: Snapshot, in box: NSRect) {
         let card = snapshot.card("system")
         let dim = alpha(card)
-        title("system", in: box, dim: dim, tag: card?.sub ?? "cpu · ram")
+        title("system", in: box, dim: dim, tag: card?.sub ?? "cpu · ram · net")
 
         func reading(_ name: String) -> Int? {
             card?.stats.first { $0.label == name }.flatMap { Int($0.value) }
@@ -1805,25 +1806,80 @@ final class ClusterView: ThemeView {
         func text(_ name: String) -> String? {
             card?.stats.first { $0.label == name }?.value
         }
+        func footprint(_ used: String, _ total: String) -> String? {
+            guard let used = text(used), let total = text(total) else { return nil }
+            return "\(used) of \(total)"
+        }
 
-        let dialWidth: CGFloat = 140
-        let dialCentre = NSPoint(x: box.minX + 14 + dialWidth / 2, y: box.minY + 70)
-        drawCpuDial(reading("cpu"), centre: dialCentre, radius: 46, dim: dim,
-                    readoutY: box.minY + 118)
+        let radius: CGFloat = 44
+        let column: CGFloat = 140
+        let centreY = box.minY + 66
+        let readoutY = box.minY + 106
 
-        let left = box.minX + 14 + dialWidth + 26
-        let right = box.maxX - 14
-        drawRamTacho(reading("ram"), used: text("ram_used"), total: text("ram_total"),
-                     left: left, right: right, in: box, dim: dim)
+        drawDial(reading("cpu"), scaleMax: 100, unit: "% cpu", warn: 0.6, danger: 0.8,
+                 centre: NSPoint(x: box.minX + 14 + column / 2, y: centreY),
+                 radius: radius, dim: dim, readoutY: readoutY)
+
+        // 200ms full scale: past that the link is unusable and the exact
+        // number stops mattering, which is what a pegged needle should say.
+        drawDial(reading("ping"), scaleMax: 200, unit: "ms", warn: 0.3, danger: 0.6,
+                 centre: NSPoint(x: box.maxX - 14 - column / 2, y: centreY),
+                 radius: radius, dim: dim, readoutY: readoutY)
+
+        if let down = text("net_down"), let up = text("net_up") {
+            let rates = "↓ \(down)   ↑ \(up)"
+            let width = NSAttributedString(string: rates.uppercased(),
+                                           attributes: [.font: capsTiny, .kern: 0.9]).size().width
+            Gauge.label(rates, at: NSPoint(x: box.maxX - 14 - column / 2 - width / 2,
+                                           y: box.minY + 130),
+                        font: capsTiny, color: VFD.label.withAlphaComponent(0.8 * dim))
+        }
+
+        let left = box.minX + 14 + column + 26
+        let right = box.maxX - 14 - column - 26
+        drawUsageRow("ram", reading("ram"), footprint("ram_used", "ram_total"),
+                     left: left, right: right, top: box.minY + 26, dim: dim)
+        drawUsageRow("swap", reading("swap"), footprint("swap_used", "swap_total"),
+                     left: left, right: right, top: box.minY + 76, dim: dim)
+    }
+
+    /// One "how much is gone" row: numeral, then a bar filling the rest. Load,
+    /// not budget, so the ramp is read backwards — a full bar is the bad end.
+    private func drawUsageRow(_ name: String, _ value: Int?, _ detail: String?,
+                              left: CGFloat, right: CGFloat, top: CGFloat, dim: CGFloat) {
+        let colour = value.map { VFD.level(100 - $0) } ?? VFD.cyan
+        Gauge.label(name, at: NSPoint(x: left, y: top), font: capsTiny,
+                    color: VFD.label.withAlphaComponent(dim))
+        if let detail {
+            Gauge.label(detail, at: NSPoint(x: right, y: top), font: capsTiny,
+                        color: VFD.label.withAlphaComponent(0.85 * dim), alignRight: true)
+        }
+
+        let digits = value.map(String.init) ?? "--"
+        SevenSegment.draw(digits, at: NSPoint(x: left, y: top + 12), metrics: rowSeg,
+                          lit: colour.withAlphaComponent(dim),
+                          unlit: SevenSegment.ghost(VFD.cyan, metrics: rowSeg))
+        Gauge.label("%", at: NSPoint(x: left + SevenSegment.width(digits, metrics: rowSeg) + 4,
+                                      y: top + 30),
+                    font: capsTiny, color: colour.withAlphaComponent(0.85 * dim))
+
+        // Widest numeral the row can show, so both bars share a left edge.
+        let barLeft = left + SevenSegment.width("100", metrics: rowSeg) + 22
+        Gauge.bar(in: NSRect(x: barLeft, y: top + 18, width: right - barLeft, height: 11),
+                  segments: 20, fraction: Double(value ?? 0) / 100,
+                  lit: colour.withAlphaComponent(dim),
+                  unlit: VFD.cyan.withAlphaComponent(0.10), gap: 2.4)
     }
 
     /// A boost-gauge face: ticks radiating round a 270° sweep, cool at the
     /// bottom of the range and red at the top, a needle, and the reading
-    /// repeated digitally inside the dial the way the electronic ones do.
-    /// The band colours belong to the face, not the needle, so the red is
-    /// there to read against whether or not the needle has reached it.
-    private func drawCpuDial(_ value: Int?, centre: NSPoint, radius: CGFloat, dim: CGFloat,
-                             readoutY: CGFloat) {
+    /// repeated digitally below. The bands belong to the face, not the needle,
+    /// so the red is there to read against before anything reaches it. Below
+    /// rather than inside, because a 270° sweep puts the needle through the
+    /// middle of the dial, where it would cross its own readout.
+    private func drawDial(_ value: Int?, scaleMax: Int, unit: String,
+                          warn: CGFloat, danger: CGFloat,
+                          centre: NSPoint, radius: CGFloat, dim: CGFloat, readoutY: CGFloat) {
         // Flipped view: y grows downward, so a conventional angle is plotted
         // with -sin. Sweep runs 225° (lower left) clockwise to -45°.
         func point(_ fraction: CGFloat, _ distance: CGFloat) -> NSPoint {
@@ -1832,8 +1888,8 @@ final class ClusterView: ThemeView {
                            y: centre.y - distance * sin(angle))
         }
         func bandColour(_ fraction: CGFloat) -> NSColor {
-            if fraction >= 0.8 { return VFD.red }
-            if fraction >= 0.6 { return VFD.amber }
+            if fraction >= danger { return VFD.red }
+            if fraction >= warn { return VFD.amber }
             return VFD.cyan
         }
 
@@ -1841,19 +1897,17 @@ final class ClusterView: ThemeView {
         for index in 0...steps {
             let fraction = CGFloat(index) / CGFloat(steps)
             let major = index % 5 == 0
-            let outer = radius
-            let inner = radius - (major ? 11 : 6)
             let path = NSBezierPath()
-            path.move(to: point(fraction, inner))
-            path.line(to: point(fraction, outer))
+            path.move(to: point(fraction, radius - (major ? 11 : 6)))
+            path.line(to: point(fraction, radius))
             path.lineWidth = major ? 2.2 : 1.2
             bandColour(fraction).withAlphaComponent((major ? 0.95 : 0.55) * dim).setStroke()
             path.stroke()
         }
 
-        for step in stride(from: 0, through: 100, by: 20) {
-            let fraction = CGFloat(step) / 100
-            let at = point(fraction, radius - 19)
+        for step in stride(from: 0, through: scaleMax, by: max(1, scaleMax / 5)) {
+            let fraction = CGFloat(step) / CGFloat(scaleMax)
+            let at = point(fraction, radius - 18)
             let label = String(step)
             let size = NSAttributedString(string: label,
                                           attributes: [.font: capsTiny, .kern: 0.9]).size()
@@ -1862,9 +1916,10 @@ final class ClusterView: ThemeView {
                         color: bandColour(fraction).withAlphaComponent(0.85 * dim))
         }
 
-        // Needle. Parked at zero when there is no reading rather than hidden,
-        // because a dial with no needle reads as a broken gauge.
-        let fraction = CGFloat(value ?? 0) / 100
+        // Parked at zero when there is no reading rather than hidden, because
+        // a dial with no needle reads as a broken gauge. Pegged at full scale
+        // rather than swung past it, the way a real needle stops.
+        let fraction = min(1, CGFloat(value ?? 0) / CGFloat(scaleMax))
         let needle = NSBezierPath()
         needle.move(to: point(fraction, -8))
         needle.line(to: point(fraction, radius - 8))
@@ -1874,79 +1929,20 @@ final class ClusterView: ThemeView {
         needle.stroke()
 
         let hub: CGFloat = 6
-        let hubRect = NSRect(x: centre.x - hub / 2, y: centre.y - hub / 2, width: hub, height: hub)
         VFD.red.withAlphaComponent(0.9 * dim).setFill()
-        NSBezierPath(ovalIn: hubRect).fill()
+        NSBezierPath(ovalIn: NSRect(x: centre.x - hub / 2, y: centre.y - hub / 2,
+                                    width: hub, height: hub)).fill()
 
-        // Repeated digitally under the face, the way the electronic gauges do
-        // it — below rather than inside, because the needle sweeps through the
-        // middle of a 270° dial and would cross its own readout.
         let digits = value.map(String.init) ?? "--"
         let width = SevenSegment.width(digits, metrics: tinySeg)
-        let unit = NSAttributedString(string: "% CPU",
-                                      attributes: [.font: capsTiny, .kern: 0.9]).size().width
-        let readoutX = centre.x - (width + 5 + unit) / 2
+        let unitWidth = NSAttributedString(string: unit.uppercased(),
+                                           attributes: [.font: capsTiny, .kern: 0.9]).size().width
+        let readoutX = centre.x - (width + 5 + unitWidth) / 2
         SevenSegment.draw(digits, at: NSPoint(x: readoutX, y: readoutY), metrics: tinySeg,
                           lit: bandColour(fraction).withAlphaComponent(dim),
                           unlit: SevenSegment.ghost(VFD.cyan, metrics: tinySeg))
-        Gauge.label("% cpu", at: NSPoint(x: readoutX + width + 5, y: readoutY + 11),
+        Gauge.label(unit, at: NSPoint(x: readoutX + width + 5, y: readoutY + 11),
                     font: capsTiny, color: VFD.label.withAlphaComponent(0.75 * dim))
-    }
-
-    /// The wedge tacho, now carrying RAM: segments growing left to right over
-    /// a numbered scale, lit as far as the tank is used. The ramp is the
-    /// scale's shape, not the data — how far it is lit is the reading.
-    private func drawRamTacho(_ value: Int?, used: String?, total: String?,
-                              left: CGFloat, right: CGFloat, in box: NSRect, dim: CGFloat) {
-        Gauge.label("ram", at: NSPoint(x: left, y: box.minY + 24), font: capsTiny,
-                    color: VFD.label.withAlphaComponent(dim))
-        if let used, let total {
-            Gauge.label("\(used) of \(total)", at: NSPoint(x: right, y: box.minY + 24),
-                        font: capsTiny, color: VFD.label.withAlphaComponent(0.85 * dim),
-                        alignRight: true)
-        }
-
-        let colour = value.map { VFD.level(100 - $0) } ?? VFD.cyan
-        let digits = value.map(String.init) ?? "--"
-        SevenSegment.draw(digits, at: NSPoint(x: left, y: box.minY + 38), metrics: rowSeg,
-                          lit: colour.withAlphaComponent(dim),
-                          unlit: SevenSegment.ghost(VFD.cyan, metrics: rowSeg))
-        Gauge.label("%", at: NSPoint(x: left + SevenSegment.width(digits, metrics: rowSeg) + 4,
-                                      y: box.minY + 56),
-                    font: capsTiny, color: colour.withAlphaComponent(0.85 * dim))
-
-        let baseline = box.minY + 116
-        let ticks = 44
-        let gap: CGFloat = 3.0
-        let tickWidth = (right - left - CGFloat(ticks - 1) * gap) / CGFloat(ticks)
-        let lit = Int((Double(ticks) * Double(value ?? 0) / 100).rounded())
-        let redline = Int(Double(ticks) * 0.85)
-
-        for index in 0..<ticks {
-            let ramp = CGFloat(index) / CGFloat(ticks - 1)
-            let height = 8 + 30 * ramp
-            let rect = NSRect(x: left + CGFloat(index) * (tickWidth + gap),
-                              y: baseline - height, width: tickWidth, height: height)
-            let band = index >= redline ? VFD.red : VFD.cyan
-            band.withAlphaComponent(index < lit ? 0.92 * dim : 0.10).setFill()
-            rect.fill()
-        }
-
-        VFD.hairline.withAlphaComponent(0.75 * dim).setFill()
-        NSRect(x: left, y: baseline + 2, width: right - left, height: 1).fill()
-
-        for step in stride(from: 0, through: 100, by: 10) {
-            let x = left + CGFloat(step) / 100 * (right - left)
-            let major = step % 20 == 0
-            VFD.hairline.withAlphaComponent((major ? 0.9 : 0.5) * dim).setFill()
-            NSRect(x: x, y: baseline + 3, width: 1, height: major ? 5 : 3).fill()
-            guard major else { continue }
-            let label = String(step)
-            let width = NSAttributedString(string: label,
-                                           attributes: [.font: capsTiny, .kern: 0.9]).size().width
-            Gauge.label(label, at: NSPoint(x: min(x - width / 2, right - width), y: baseline + 10),
-                        font: capsTiny, color: VFD.label.withAlphaComponent(0.7 * dim))
-        }
     }
 
     /// Warning lamps. Unlit lamps stay faintly visible — a dark bulb is still a

@@ -12,6 +12,7 @@ garmin.py          fetches the Garmin health snapshot (runs under venv/)
 garmin-login.py    one-time interactive Garmin Connect sign-in
 add-codex-account.py  one-time interactive second Codex sign-in + wiring
 garmin.json        latest health snapshot
+net-sample.json    previous interface byte counters, for the throughput delta
 garth/             Garmin OAuth tokens, mode 700. No password is ever stored.
 venv/              python venv holding garminconnect, the only dependency
 AgentWidgets.swift the panel + menu bar item: borderless AppKit window
@@ -97,19 +98,35 @@ The `system` card reads the machine the rest of this is running on. Both are
 **load, not budget**, so the colour ramp runs backwards from every other gauge
 here — a full bar is the bad end.
 
-The cluster theme gives them two different shapes, because they answer
-different questions. CPU is the twitchy one you read at a glance — a needle's
-angle registers before any number does — so it gets a round boost-gauge face:
-ticks radiating round a 270° sweep, cool at the bottom of the range and red at
-the top, with the reading repeated digitally *below* the face. Below rather
-than inside, because the needle sweeps through the middle of a 270° dial and
-would cross its own readout.
+The cluster row is a dial at each end with compact bars between them. CPU and
+ping are the twitchy ones — a needle's angle registers before a number does —
+and bracketing the row with them makes it read as a cluster rather than a list.
+RAM and swap change slowly and only answer "how much is gone", which a bar does
+in a fraction of the space.
 
-RAM moves slowly and what matters is how much of the tank is gone, so it takes
-the wedge: segments growing left to right over a numbered scale, lit as far as
-the reading goes. On both, the bands belong to the face rather than the needle
-— the red is painted in, so it is there to read against whether or not the
-reading has reached it.
+Each dial is a boost-gauge face: ticks radiating round a 270° sweep, cool at
+the bottom of the range and red at the top, with the reading repeated digitally
+*below* the face. Below rather than inside, because the needle sweeps through
+the middle of a 270° dial and would cross its own readout. The bands belong to
+the face rather than the needle, so the red is there to read against before
+anything reaches it, and the needle pegs at full scale rather than swinging
+past it.
+
+**Ping** is a single ICMP round trip to `1.1.1.1` — a fixed address rather than
+a hostname, so DNS latency is not folded into a number meant to describe the
+link. It costs ~37ms. Full scale is 200ms: past that the link is unusable and
+the exact figure stops mattering, which is what a pegged needle should say.
+
+**Throughput** under the ping dial is `netstat -ib`'s byte counters differenced
+across polls, kept in `net-sample.json`. That costs nothing and describes real
+traffic; a speed test would have to move real data to answer the same question
+every 30 seconds, forever. A sample older than 10 minutes is discarded rather
+than averaged into a rate, and counters that went backwards (reboot, interface
+bounce) report nothing. Wi-Fi link rate and RSSI are *not* shown: the only
+source without sudo is `system_profiler SPAirPortDataType`, which takes ~8.7s.
+
+**Swap** sits under RAM because it is the actionable half of memory pressure —
+RAM percent alone understates it.
 
 The hud theme keeps plain bars; neither shape belongs in a 236pt Apple-native
 strip.
