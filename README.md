@@ -91,6 +91,24 @@ The reading refreshes every 30 seconds, including while network-backed cards are
 served from cache. `0` is valid. If process inspection fails, the card shows
 `--` / `STALE` rather than reusing a count as though it were current.
 
+## CPU and RAM
+
+The `system` card reads the machine the rest of this is running on. Both are
+**load, not budget**, so the colour ramp runs backwards from every other gauge
+here — a full bar is the bad end.
+
+CPU is the sum of `ps`'s per-process `%cpu` divided by core count. That lands
+within a point of `top -l 2 -n 0 -s 1`'s user+sys (measured 27.0 against 26.9)
+and costs ~70ms instead of ~2.7s: `top` has to take two samples a second apart,
+and burns its own CPU doing it. It also reuses the single `ps` the active-agent
+count already makes, so the two readings describe the same instant.
+
+RAM is `vm_stat`'s active + wired + compressed over `hw.memsize` — what
+Activity Monitor calls Memory Used. `top`'s `PhysMem` line calls everything
+that is not free "used", which counts reclaimable file cache; that reads as
+94% on a machine with plenty of headroom, which is true, unactionable, and
+alarming on a gauge.
+
 ## Two Claude subscriptions
 
 Claude Code keeps exactly one login per config directory, so a second

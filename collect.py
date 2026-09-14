@@ -401,24 +401,36 @@ NON_AGENT_OPENCODE_COMMANDS = {
 }
 
 
+def process_table():
+    """One `ps` per run, shared by the agent count and the CPU reading.
+
+    Spawning it twice would have two cards disagree about the same instant,
+    and this is the most expensive local call the collector makes.
+    """
+    if "ps" in _run_cache:
+        return _run_cache["ps"]
+    proc = subprocess.run(
+        [PS, "-axo", "%cpu=,comm=,args="], capture_output=True, text=True, timeout=5
+    )
+    if proc.returncode != 0:
+        raise RuntimeError("process inspection failed")
+    _run_cache["ps"] = proc.stdout
+    return proc.stdout
+
+
 def active_agent_counts(ps_output=None):
     if ps_output is None:
-        proc = subprocess.run(
-            [PS, "-axo", "comm=,args="], capture_output=True, text=True, timeout=5
-        )
-        if proc.returncode != 0:
-            raise RuntimeError("process inspection failed")
-        ps_output = proc.stdout
+        ps_output = process_table()
 
     counts = {"claude": 0, "codex": 0, "opencode": 0}
     for line in ps_output.splitlines():
-        fields = line.strip().split(None, 1)
-        if not fields:
+        fields = line.strip().split(None, 2)
+        if len(fields) < 2:
             continue
-        executable = os.path.basename(fields[0])
+        executable = os.path.basename(fields[1])
         if executable not in counts:
             continue
-        argv = fields[1].split() if len(fields) > 1 else []
+        argv = fields[2].split() if len(fields) > 2 else []
         command = argv[1] if len(argv) > 1 and not argv[1].startswith("-") else None
         if executable == "codex" and command in NON_AGENT_CODEX_COMMANDS:
             continue
@@ -439,6 +451,77 @@ def fetch_agents():
             {"label": "opencode", "value": str(counts["opencode"])},
         ],
         "meters": [], "state": "ok",
+    }
+
+
+def cpu_percent(ps_output=None):
+    """Busy percent across all cores.
+
+    Summing ps's per-process %cpu and dividing by core count lands within a
+    point of `top -l 2 -n 0 -s 1`'s user+sys (measured 27.0 against 26.9) at
+    a fraction of the cost: top has to take two samples a second apart, and
+    spends ~2.7s of a 30s tick — plus its own CPU — to do it.
+    """
+    ps_output = process_table() if ps_output is None else ps_output
+    total = 0.0
+    for line in ps_output.splitlines():
+        head = line.strip().split(None, 1)
+        if not head:
+            continue
+        try:
+            total += float(head[0])
+        except ValueError:
+            continue
+    return max(0, min(100, int(round(total / (os.cpu_count() or 1)))))
+
+
+def memory_usage():
+    """-> (used bytes, total bytes), counted the way Activity Monitor does.
+
+    Used is active + wired + compressed. `top`'s PhysMem line calls everything
+    that is not free "used", which counts reclaimable file cache and reads as
+    94% on a machine with plenty of headroom — true, but nothing you can act
+    on, and alarming on a gauge.
+    """
+    out = subprocess.run(["/usr/bin/vm_stat"], capture_output=True, text=True,
+                         timeout=5).stdout
+    match = re.search(r"page size of (\d+)", out)
+    page = int(match.group(1)) if match else 4096
+    pages = {}
+    for line in out.splitlines():
+        # The header carries a colon too ("...Statistics: (page size of N
+        # bytes)"), so match on the value being a count rather than on the
+        # separator.
+        name, sep, value = line.partition(":")
+        value = value.strip().rstrip(".")
+        if sep and value.isdigit():
+            pages[name.strip()] = int(value)
+    used = page * (
+        pages.get("Pages active", 0)
+        + pages.get("Pages wired down", 0)
+        + pages.get("Pages occupied by compressor", 0)
+    )
+    total = int(subprocess.run(["/usr/sbin/sysctl", "-n", "hw.memsize"],
+                               capture_output=True, text=True, timeout=5).stdout or 0)
+    return used, total
+
+
+def fetch_system():
+    used, total = memory_usage()
+    cores = os.cpu_count() or 1
+    return {
+        "id": "system",
+        "kind": "system",
+        "label": "System",
+        "sub": f"{cores} cores",
+        "stats": [
+            {"label": "cpu", "value": str(cpu_percent())},
+            {"label": "ram", "value": str(int(round(100 * used / total)) if total else 0)},
+            {"label": "ram_used", "value": compact_bytes(used)},
+            {"label": "ram_total", "value": compact_bytes(total)},
+        ],
+        "meters": [],
+        "state": "ok",
     }
 
 
@@ -1226,6 +1309,7 @@ def providers():
     for account in codex_accounts():
         cards.append((account["id"], (lambda acct: lambda: fetch_codex(acct))(account)))
     cards += [
+        ("system", fetch_system),
         ("garmin", fetch_garmin),
         ("models", fetch_models),
         ("local", fetch_local),
@@ -1234,7 +1318,7 @@ def providers():
     return cards
 
 
-NON_QUOTA_CARDS = ("agents", "models", "local", "garmin", "prs")
+NON_QUOTA_CARDS = ("agents", "system", "models", "local", "garmin", "prs")
 
 
 # --- cache / lock ------------------------------------------------------------
@@ -1270,9 +1354,10 @@ def stale_card(cache, card_id, state):
         card = dict(card, state=state)
     else:
         labels = {"agents": "Active Agents", "codex": "Codex", "garmin": "Health",
-                  "models": "Models", "local": "Local", "prs": "PRs Merged"}
+                  "models": "Models", "local": "Local", "prs": "PRs Merged",
+                  "system": "System"}
         kinds = {"agents": "agents", "models": "models", "local": "local",
-                 "garmin": "health", "prs": "prs"}
+                 "garmin": "health", "prs": "prs", "system": "system"}
         provider = None
         for account in claude_accounts():
             if account["id"] == card_id:

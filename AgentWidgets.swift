@@ -76,6 +76,7 @@ struct Card: Decodable {
     var isHealth: Bool { kind == "health" }
     var isPRs: Bool { kind == "prs" }
     var isAgents: Bool { kind == "agents" }
+    var isSystem: Bool { kind == "system" }
 
     enum CodingKeys: String, CodingKey {
         case id, label, provider, sub, kind, meters, rows, stats, note, state, days
@@ -576,6 +577,10 @@ final class PanelView: ThemeView {
 
         if card.isPRs { return height + prsHeight(card) }
         if card.isAgents { return height + 38 }
+        if card.isSystem {
+            let row = Style.meterLabel.pointSize + Style.labelGap + Style.trackHeight
+            return height + 2 * row + Style.meterGap
+        }
 
         let rows = visibleMeters(card)
         if rows.isEmpty {
@@ -667,6 +672,11 @@ final class PanelView: ThemeView {
 
             if card.isAgents {
                 y = drawAgents(card, left: left, right: right, y: y, dim: dim)
+                continue
+            }
+
+            if card.isSystem {
+                y = drawSystem(card, left: left, right: right, y: y, dim: dim)
                 continue
             }
 
@@ -818,6 +828,62 @@ final class PanelView: ThemeView {
         return y + Style.chartHeight + Style.labelGap + Style.sub.pointSize
     }
 
+    /// Load, not budget: the bar fills as the machine gets busier, and the
+    /// colour ramp is read backwards from every other card here so that full
+    /// is the bad end.
+    private func drawSystem(_ card: Card, left: CGFloat, right: CGFloat,
+                            y: CGFloat, dim: CGFloat) -> CGFloat {
+        func reading(_ name: String) -> Int? {
+            card.stats.first { $0.label == name }.flatMap { Int($0.value) }
+        }
+        func text(_ name: String) -> String? {
+            card.stats.first { $0.label == name }?.value
+        }
+        let footprint = text("ram_used").flatMap { used in
+            text("ram_total").map { "\(used) of \($0)" }
+        }
+
+        var y = y
+        for (index, row) in [("cpu", reading("cpu"), nil),
+                             ("ram", reading("ram"), footprint)].enumerated() {
+            let (name, used, detail) = row
+            if index > 0 { y += Style.meterGap }
+
+            drawText(name, font: Style.meterLabel,
+                     color: Style.secondary.withAlphaComponent(0.62 * dim),
+                     at: NSPoint(x: left, y: y))
+
+            let value = NSMutableAttributedString(
+                string: used.map { "\($0)%" } ?? "—",
+                attributes: [.font: Style.pct,
+                             .foregroundColor: Style.primary.withAlphaComponent(0.92 * dim)])
+            if let detail {
+                value.append(NSAttributedString(
+                    string: " · \(detail)",
+                    attributes: [.font: Style.meterLabel,
+                                 .foregroundColor: Style.secondary.withAlphaComponent(0.62 * dim)]))
+            }
+            value.draw(at: NSPoint(x: right - value.size().width, y: y))
+            y += Style.meterLabel.pointSize + Style.labelGap
+
+            let track = NSRect(x: left, y: y, width: right - left, height: Style.trackHeight)
+            let path = NSBezierPath(roundedRect: track, xRadius: Style.trackHeight / 2,
+                                    yRadius: Style.trackHeight / 2)
+            Style.track.setFill()
+            path.fill()
+            if let used, used > 0 {
+                let width = max(Style.trackHeight, track.width * CGFloat(used) / 100)
+                let fill = NSRect(x: left, y: y, width: width, height: Style.trackHeight)
+                let filled = NSBezierPath(roundedRect: fill, xRadius: Style.trackHeight / 2,
+                                          yRadius: Style.trackHeight / 2)
+                Style.meterColor(100 - used).withAlphaComponent(dim).setFill()
+                filled.fill()
+            }
+            y += Style.trackHeight
+        }
+        return y
+    }
+
     private func drawAgents(_ card: Card, left: CGFloat, right: CGFloat,
                             y: CGFloat, dim: CGFloat) -> CGFloat {
         let value = card.activeTotal.map(String.init) ?? "--"
@@ -952,7 +1018,7 @@ final class ClusterView: ThemeView {
     override var backdropColor: NSColor { NSColor(srgbRed: 0.02, green: 0.02, blue: 0.024, alpha: 0.97) }
     override var cornerRadius: CGFloat { 8 }
     override var borderColor: NSColor { VFD.hairline.withAlphaComponent(0.5) }
-    override var fittingHeight: CGFloat { 604 }
+    override var fittingHeight: CGFloat { 676 }
 
     private let pad: CGFloat = 12
 
@@ -1007,9 +1073,12 @@ final class ClusterView: ThemeView {
         // a size and a count each, not a single reading, so they get the whole
         // width rather than a cell in the column grid.
         let localBox = NSRect(x: 12, y: 470, width: 676, height: 120)
+        // Fifth row: the machine the rest of this is running on. Two readings,
+        // so they sit side by side rather than taking a column cell each.
+        let systemBox = NSRect(x: 12, y: 604, width: 676, height: 58)
 
         for box in [heroBox, rampBox, quotaBox, vitalsBox, readBox, agentsBox, mergeBox,
-                    historyBox, localBox] {
+                    historyBox, localBox, systemBox] {
             Gauge.box(box, color: VFD.hairline.withAlphaComponent(0.85), radius: 4)
         }
 
@@ -1022,6 +1091,7 @@ final class ClusterView: ThemeView {
         drawMergeCounter(snapshot, in: mergeBox)
         drawMergeHistory(snapshot, in: historyBox)
         drawLocalModels(snapshot, in: localBox)
+        drawSystem(snapshot, in: systemBox)
     }
 
     /// Panel title, sitting on the box's top edge the way a real face does.
@@ -1715,6 +1785,62 @@ final class ClusterView: ThemeView {
                 NSRect(x: centre - labelWidth / 2 - 1, y: top + barHeight + 44,
                        width: labelWidth + 2, height: 1.5).fill()
             }
+        }
+    }
+
+    /// CPU and RAM read the opposite way round to every other gauge here:
+    /// these are load, not budget, so the ramp is inverted — a full bar is the
+    /// bad end, not the good one.
+    private func drawSystem(_ snapshot: Snapshot, in box: NSRect) {
+        let card = snapshot.card("system")
+        let dim = alpha(card)
+        title("system", in: box, dim: dim, tag: card?.sub ?? "cpu · ram")
+
+        func reading(_ name: String) -> Int? {
+            card?.stats.first { $0.label == name }.flatMap { Int($0.value) }
+        }
+        func text(_ name: String) -> String? {
+            card?.stats.first { $0.label == name }?.value
+        }
+        let footprint = text("ram_used").flatMap { used in
+            text("ram_total").map { "\(used) of \($0)" }
+        }
+
+        let columns: [(String, Int?, String?)] = [
+            ("cpu", reading("cpu"), nil),
+            ("ram", reading("ram"), footprint),
+        ]
+        let gutter: CGFloat = 24
+        let half = (box.width - 28 - gutter) / 2
+        for (index, column) in columns.enumerated() {
+            let (name, value, detail) = column
+            let x = box.minX + 14 + CGFloat(index) * (half + gutter)
+            let right = x + half
+            let top = box.minY + 18
+            let colour = value.map { VFD.level(100 - $0) } ?? VFD.cyan
+
+            Gauge.label(name, at: NSPoint(x: x, y: top), font: capsTiny,
+                        color: VFD.label.withAlphaComponent(dim))
+            if let detail {
+                Gauge.label(detail, at: NSPoint(x: right, y: top), font: capsTiny,
+                            color: VFD.label.withAlphaComponent(0.85 * dim), alignRight: true)
+            }
+
+            let digits = value.map(String.init) ?? "--"
+            SevenSegment.draw(digits, at: NSPoint(x: x, y: top + 12), metrics: tinySeg,
+                              lit: colour.withAlphaComponent(dim),
+                              unlit: SevenSegment.ghost(VFD.cyan, metrics: tinySeg))
+            Gauge.label("%", at: NSPoint(x: x + SevenSegment.width(digits, metrics: tinySeg) + 3,
+                                          y: top + 23),
+                        font: capsTiny, color: colour.withAlphaComponent(0.85 * dim))
+
+            // Same left edge as the quota rows: widest numeral the row can
+            // show, so the bars line up whatever the reading.
+            let barLeft = x + SevenSegment.width("100", metrics: tinySeg) + 20
+            Gauge.bar(in: NSRect(x: barLeft, y: top + 18, width: right - barLeft, height: 9),
+                      segments: 20, fraction: Double(value ?? 0) / 100,
+                      lit: colour.withAlphaComponent(dim),
+                      unlit: VFD.cyan.withAlphaComponent(0.10), gap: 2.4)
         }
     }
 
