@@ -1018,7 +1018,7 @@ final class ClusterView: ThemeView {
     override var backdropColor: NSColor { NSColor(srgbRed: 0.02, green: 0.02, blue: 0.024, alpha: 0.97) }
     override var cornerRadius: CGFloat { 8 }
     override var borderColor: NSColor { VFD.hairline.withAlphaComponent(0.5) }
-    override var fittingHeight: CGFloat { 676 }
+    override var fittingHeight: CGFloat { 722 }
 
     private let pad: CGFloat = 12
 
@@ -1075,7 +1075,7 @@ final class ClusterView: ThemeView {
         let localBox = NSRect(x: 12, y: 470, width: 676, height: 120)
         // Fifth row: the machine the rest of this is running on. Two readings,
         // so they sit side by side rather than taking a column cell each.
-        let systemBox = NSRect(x: 12, y: 604, width: 676, height: 58)
+        let systemBox = NSRect(x: 12, y: 604, width: 676, height: 104)
 
         for box in [heroBox, rampBox, quotaBox, vitalsBox, readBox, agentsBox, mergeBox,
                     historyBox, localBox, systemBox] {
@@ -1788,9 +1788,13 @@ final class ClusterView: ThemeView {
         }
     }
 
-    /// CPU and RAM read the opposite way round to every other gauge here:
-    /// these are load, not budget, so the ramp is inverted — a full bar is the
-    /// bad end, not the good one.
+    /// The tacho. CPU is the one reading here that behaves like engine revs,
+    /// so it gets the shape an 80s cluster used for revs: a wedge of segments
+    /// that grows left to right, lit as far as the reading goes, over a
+    /// numbered scale. The wedge is the *scale*, not the data — the height
+    /// ramp is what the dial looked like, and how far it is lit is the value.
+    /// Amber rather than the cyan the budget gauges use, because this is load:
+    /// full is the bad end, and the top of the sweep is a redline.
     private func drawSystem(_ snapshot: Snapshot, in box: NSRect) {
         let card = snapshot.card("system")
         let dim = alpha(card)
@@ -1802,46 +1806,88 @@ final class ClusterView: ThemeView {
         func text(_ name: String) -> String? {
             card?.stats.first { $0.label == name }?.value
         }
-        let footprint = text("ram_used").flatMap { used in
-            text("ram_total").map { "\(used) of \($0)" }
-        }
 
-        let columns: [(String, Int?, String?)] = [
-            ("cpu", reading("cpu"), nil),
-            ("ram", reading("ram"), footprint),
-        ]
-        let gutter: CGFloat = 24
-        let half = (box.width - 28 - gutter) / 2
-        for (index, column) in columns.enumerated() {
-            let (name, value, detail) = column
-            let x = box.minX + 14 + CGFloat(index) * (half + gutter)
-            let right = x + half
-            let top = box.minY + 18
-            let colour = value.map { VFD.level(100 - $0) } ?? VFD.cyan
+        let ramWidth: CGFloat = 150
+        let left = box.minX + 14
+        let tachRight = box.maxX - 14 - ramWidth - 24
+        let baseline = box.minY + 74
 
-            Gauge.label(name, at: NSPoint(x: x, y: top), font: capsTiny,
-                        color: VFD.label.withAlphaComponent(dim))
-            if let detail {
-                Gauge.label(detail, at: NSPoint(x: right, y: top), font: capsTiny,
-                            color: VFD.label.withAlphaComponent(0.85 * dim), alignRight: true)
+        // --- tacho -------------------------------------------------------
+        let cpu = reading("cpu")
+        let ticks = 44
+        let gap: CGFloat = 3.0
+        let tickWidth = (tachRight - left - CGFloat(ticks - 1) * gap) / CGFloat(ticks)
+        let lit = Int((Double(ticks) * Double(cpu ?? 0) / 100).rounded())
+        // Redline over the last fifth of the sweep, the way the band is
+        // painted on the dial rather than decided by the needle.
+        let redline = Int(Double(ticks) * 0.8)
+
+        for index in 0..<ticks {
+            let ramp = CGFloat(index) / CGFloat(ticks - 1)
+            let height = 9 + 33 * ramp
+            let rect = NSRect(x: left + CGFloat(index) * (tickWidth + gap),
+                              y: baseline - height, width: tickWidth, height: height)
+            let colour = index >= redline ? VFD.red : VFD.amber
+            if index < lit {
+                colour.withAlphaComponent(0.92 * dim).setFill()
+            } else {
+                colour.withAlphaComponent(0.10).setFill()
             }
-
-            let digits = value.map(String.init) ?? "--"
-            SevenSegment.draw(digits, at: NSPoint(x: x, y: top + 12), metrics: tinySeg,
-                              lit: colour.withAlphaComponent(dim),
-                              unlit: SevenSegment.ghost(VFD.cyan, metrics: tinySeg))
-            Gauge.label("%", at: NSPoint(x: x + SevenSegment.width(digits, metrics: tinySeg) + 3,
-                                          y: top + 23),
-                        font: capsTiny, color: colour.withAlphaComponent(0.85 * dim))
-
-            // Same left edge as the quota rows: widest numeral the row can
-            // show, so the bars line up whatever the reading.
-            let barLeft = x + SevenSegment.width("100", metrics: tinySeg) + 20
-            Gauge.bar(in: NSRect(x: barLeft, y: top + 18, width: right - barLeft, height: 9),
-                      segments: 20, fraction: Double(value ?? 0) / 100,
-                      lit: colour.withAlphaComponent(dim),
-                      unlit: VFD.cyan.withAlphaComponent(0.10), gap: 2.4)
+            rect.fill()
         }
+
+        VFD.hairline.withAlphaComponent(0.75 * dim).setFill()
+        NSRect(x: left, y: baseline + 2, width: tachRight - left, height: 1).fill()
+
+        // Scale, labelled every 20 so the numerals never touch at this width.
+        for step in stride(from: 0, through: 100, by: 10) {
+            let fraction = CGFloat(step) / 100
+            let x = left + fraction * (tachRight - left)
+            let major = step % 20 == 0
+            VFD.hairline.withAlphaComponent((major ? 0.9 : 0.5) * dim).setFill()
+            NSRect(x: x, y: baseline + 3, width: 1, height: major ? 5 : 3).fill()
+            guard major else { continue }
+            let label = String(step)
+            let width = NSAttributedString(string: label,
+                                           attributes: [.font: capsTiny, .kern: 0.9]).size().width
+            Gauge.label(label, at: NSPoint(x: min(x - width / 2, tachRight - width),
+                                           y: baseline + 10),
+                        font: capsTiny, color: VFD.label.withAlphaComponent(0.7 * dim))
+        }
+
+        let digits = cpu.map(String.init) ?? "--"
+        SevenSegment.draw(digits, at: NSPoint(x: left, y: box.minY + 18), metrics: tinySeg,
+                          lit: (cpu.map { $0 >= 80 ? VFD.red : VFD.amber } ?? VFD.amber)
+                              .withAlphaComponent(dim),
+                          unlit: SevenSegment.ghost(VFD.amber, metrics: tinySeg))
+        Gauge.label("% cpu",
+                    at: NSPoint(x: left + SevenSegment.width(digits, metrics: tinySeg) + 5,
+                                y: box.minY + 29),
+                    font: capsTiny, color: VFD.label.withAlphaComponent(0.75 * dim))
+
+        // --- ram ---------------------------------------------------------
+        let ram = reading("ram")
+        let ramLeft = box.maxX - 14 - ramWidth
+        let ramRight = box.maxX - 14
+        Gauge.label("ram", at: NSPoint(x: ramLeft, y: box.minY + 18), font: capsTiny,
+                    color: VFD.label.withAlphaComponent(dim))
+        if let used = text("ram_used"), let total = text("ram_total") {
+            Gauge.label("\(used) of \(total)", at: NSPoint(x: ramRight, y: box.minY + 18),
+                        font: capsTiny, color: VFD.label.withAlphaComponent(0.85 * dim),
+                        alignRight: true)
+        }
+        let ramDigits = ram.map(String.init) ?? "--"
+        let ramColour = ram.map { VFD.level(100 - $0) } ?? VFD.cyan
+        SevenSegment.draw(ramDigits, at: NSPoint(x: ramLeft, y: box.minY + 32), metrics: tinySeg,
+                          lit: ramColour.withAlphaComponent(dim),
+                          unlit: SevenSegment.ghost(VFD.cyan, metrics: tinySeg))
+        Gauge.label("%", at: NSPoint(x: ramLeft + SevenSegment.width(ramDigits, metrics: tinySeg) + 3,
+                                      y: box.minY + 43),
+                    font: capsTiny, color: ramColour.withAlphaComponent(0.85 * dim))
+        Gauge.bar(in: NSRect(x: ramLeft, y: baseline - 12, width: ramWidth, height: 9),
+                  segments: 16, fraction: Double(ram ?? 0) / 100,
+                  lit: ramColour.withAlphaComponent(dim),
+                  unlit: VFD.cyan.withAlphaComponent(0.10), gap: 2.4)
     }
 
     /// Warning lamps. Unlit lamps stay faintly visible — a dark bulb is still a

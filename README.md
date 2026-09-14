@@ -97,6 +97,15 @@ The `system` card reads the machine the rest of this is running on. Both are
 **load, not budget**, so the colour ramp runs backwards from every other gauge
 here — a full bar is the bad end.
 
+In the cluster theme CPU is the tacho, because it is the one reading that
+behaves like engine revs: a wedge of segments growing left to right over a
+numbered scale, in amber rather than the cyan the budget gauges use. The wedge
+is the *scale*, not the data — the height ramp is the shape the dial was, and
+how far it is lit is the reading. The redline over the last fifth is painted
+into the dial rather than decided by the needle, so the band is visible unlit.
+The hud theme keeps a plain bar; a VFD tacho does not belong in a 236pt
+Apple-native strip.
+
 CPU is the sum of `ps`'s per-process `%cpu` divided by core count. That lands
 within a point of `top -l 2 -n 0 -s 1`'s user+sys (measured 27.0 against 26.9)
 and costs ~70ms instead of ~2.7s: `top` has to take two samples a second apart,
