@@ -571,19 +571,6 @@ def net_rates():
     return down / elapsed, up / elapsed
 
 
-def swap_usage():
-    """-> (used bytes, total bytes) from vm.swapusage."""
-    try:
-        out = subprocess.run(["/usr/sbin/sysctl", "-n", "vm.swapusage"],
-                             capture_output=True, text=True, timeout=5).stdout
-    except Exception:
-        return 0, 0
-    def field(name):
-        match = re.search(rf"{name} = ([\d.]+)M", out)
-        return int(float(match.group(1)) * (1 << 20)) if match else 0
-    return field("used"), field("total")
-
-
 def compact_rate(value):
     if value is None:
         return None
@@ -594,7 +581,6 @@ def compact_rate(value):
 
 def fetch_system():
     used, total = memory_usage()
-    swap_used, swap_total = swap_usage()
     down, up = net_rates()
     cores = os.cpu_count() or 1
     stats = [
@@ -603,12 +589,6 @@ def fetch_system():
         {"label": "ram_used", "value": compact_bytes(used)},
         {"label": "ram_total", "value": compact_bytes(total)},
     ]
-    if swap_total:
-        stats += [
-            {"label": "swap", "value": str(int(round(100 * swap_used / swap_total)))},
-            {"label": "swap_used", "value": compact_bytes(swap_used)},
-            {"label": "swap_total", "value": compact_bytes(swap_total)},
-        ]
     latency = ping_ms()
     if latency is not None:
         stats.append({"label": "ping", "value": str(latency)})

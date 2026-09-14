@@ -98,19 +98,21 @@ The `system` card reads the machine the rest of this is running on. Both are
 **load, not budget**, so the colour ramp runs backwards from every other gauge
 here — a full bar is the bad end.
 
-The cluster row is a dial at each end with compact bars between them. CPU and
-ping are the twitchy ones — a needle's angle registers before a number does —
-and bracketing the row with them makes it read as a cluster rather than a list.
-RAM and swap change slowly and only answer "how much is gone", which a bar does
-in a fraction of the space.
+The cluster row runs CPU dial, RAM wedge, network numbers. CPU is the twitchy
+one read at a glance, so it keeps the needle: a boost-gauge face with ticks
+radiating round a 270° sweep, cool at the bottom of the range and red at the
+top, and the reading repeated digitally *below* the face — below rather than
+inside, because the needle sweeps through the middle of a 270° dial and would
+cross its own readout. The bands belong to the face rather than the needle, so
+the red is there to read against before anything reaches it.
 
-Each dial is a boost-gauge face: ticks radiating round a 270° sweep, cool at
-the bottom of the range and red at the top, with the reading repeated digitally
-*below* the face. Below rather than inside, because the needle sweeps through
-the middle of a 270° dial and would cross its own readout. The bands belong to
-the face rather than the needle, so the red is there to read against before
-anything reaches it, and the needle pegs at full scale rather than swinging
-past it.
+RAM answers "how much of the tank is gone", which the wedge shows: segments
+growing left to right over a numbered scale, lit as far as the reading goes.
+The ramp is the scale's shape, not the data.
+
+Ping and throughput are plain numbers in their own column. Latency barely
+moves and throughput is spiky and unbounded, so neither earns a face — and
+giving them a column is what keeps the wedge from eating the row.
 
 **Ping** is a single ICMP round trip to `1.1.1.1` — a fixed address rather than
 a hostname, so DNS latency is not folded into a number meant to describe the
@@ -124,9 +126,6 @@ every 30 seconds, forever. A sample older than 10 minutes is discarded rather
 than averaged into a rate, and counters that went backwards (reboot, interface
 bounce) report nothing. Wi-Fi link rate and RSSI are *not* shown: the only
 source without sudo is `system_profiler SPAirPortDataType`, which takes ~8.7s.
-
-**Swap** sits under RAM because it is the actionable half of memory pressure —
-RAM percent alone understates it.
 
 The hud theme keeps plain bars; neither shape belongs in a 236pt Apple-native
 strip.

@@ -1788,13 +1788,14 @@ final class ClusterView: ThemeView {
         }
     }
 
-    /// The machine row: a dial at each end, compact bars between them.
+    /// The machine row: CPU on a dial, RAM on the wedge tacho, network as
+    /// plain numbers.
     ///
-    /// CPU and ping are the twitchy ones — a needle's angle registers before a
-    /// number does — and they bracket the row so it reads as a cluster rather
-    /// than a list. RAM and swap change slowly and only need to answer "how
-    /// much is gone", which a bar does in a fraction of the space the wedge
-    /// was taking.
+    /// CPU is the twitchy one read at a glance, so it keeps the needle. RAM
+    /// answers "how much of the tank is gone", which the wedge shows. Ping and
+    /// throughput are just numbers: latency barely moves and throughput is
+    /// spiky and unbounded, so neither earns a face — and giving the numbers
+    /// their own column is what stops the wedge eating the row.
     private func drawSystem(_ snapshot: Snapshot, in box: NSRect) {
         let card = snapshot.card("system")
         let dim = alpha(card)
@@ -1806,69 +1807,93 @@ final class ClusterView: ThemeView {
         func text(_ name: String) -> String? {
             card?.stats.first { $0.label == name }?.value
         }
-        func footprint(_ used: String, _ total: String) -> String? {
-            guard let used = text(used), let total = text(total) else { return nil }
-            return "\(used) of \(total)"
-        }
 
-        let radius: CGFloat = 44
-        let column: CGFloat = 140
-        let centreY = box.minY + 66
-        let readoutY = box.minY + 106
-
+        let dialColumn: CGFloat = 140
+        let netColumn: CGFloat = 120
         drawDial(reading("cpu"), scaleMax: 100, unit: "% cpu", warn: 0.6, danger: 0.8,
-                 centre: NSPoint(x: box.minX + 14 + column / 2, y: centreY),
-                 radius: radius, dim: dim, readoutY: readoutY)
+                 centre: NSPoint(x: box.minX + 14 + dialColumn / 2, y: box.minY + 66),
+                 radius: 44, dim: dim, readoutY: box.minY + 106)
 
-        // 200ms full scale: past that the link is unusable and the exact
-        // number stops mattering, which is what a pegged needle should say.
-        drawDial(reading("ping"), scaleMax: 200, unit: "ms", warn: 0.3, danger: 0.6,
-                 centre: NSPoint(x: box.maxX - 14 - column / 2, y: centreY),
-                 radius: radius, dim: dim, readoutY: readoutY)
+        let left = box.minX + 14 + dialColumn + 26
+        let right = box.maxX - 14 - netColumn - 26
+        drawRamTacho(reading("ram"), used: text("ram_used"), total: text("ram_total"),
+                     left: left, right: right, in: box, dim: dim)
 
-        if let down = text("net_down"), let up = text("net_up") {
-            let rates = "↓ \(down)   ↑ \(up)"
-            let width = NSAttributedString(string: rates.uppercased(),
-                                           attributes: [.font: capsTiny, .kern: 0.9]).size().width
-            Gauge.label(rates, at: NSPoint(x: box.maxX - 14 - column / 2 - width / 2,
-                                           y: box.minY + 130),
-                        font: capsTiny, color: VFD.label.withAlphaComponent(0.8 * dim))
+        let netLeft = box.maxX - 14 - netColumn
+        let netRight = box.maxX - 14
+        let rows: [(String, String?)] = [
+            ("ping", text("ping").map { "\($0) ms" }),
+            ("down", text("net_down")),
+            ("up", text("net_up")),
+        ]
+        for (index, row) in rows.enumerated() {
+            let y = box.minY + 30 + CGFloat(index) * 26
+            Gauge.label(row.0, at: NSPoint(x: netLeft, y: y), font: capsTiny,
+                        color: VFD.label.withAlphaComponent(0.7 * dim))
+            Gauge.label(row.1 ?? "—", at: NSPoint(x: netRight, y: y), font: capsSmall,
+                        color: VFD.cyan.withAlphaComponent(0.9 * dim), alignRight: true)
+            if index < rows.count - 1 {
+                VFD.hairline.withAlphaComponent(0.4 * dim).setFill()
+                NSRect(x: netLeft, y: y + 17, width: netColumn, height: 1).fill()
+            }
         }
-
-        let left = box.minX + 14 + column + 26
-        let right = box.maxX - 14 - column - 26
-        drawUsageRow("ram", reading("ram"), footprint("ram_used", "ram_total"),
-                     left: left, right: right, top: box.minY + 26, dim: dim)
-        drawUsageRow("swap", reading("swap"), footprint("swap_used", "swap_total"),
-                     left: left, right: right, top: box.minY + 76, dim: dim)
     }
 
-    /// One "how much is gone" row: numeral, then a bar filling the rest. Load,
-    /// not budget, so the ramp is read backwards — a full bar is the bad end.
-    private func drawUsageRow(_ name: String, _ value: Int?, _ detail: String?,
-                              left: CGFloat, right: CGFloat, top: CGFloat, dim: CGFloat) {
-        let colour = value.map { VFD.level(100 - $0) } ?? VFD.cyan
-        Gauge.label(name, at: NSPoint(x: left, y: top), font: capsTiny,
+    /// The wedge tacho: segments growing left to right over a numbered scale,
+    /// lit as far as the reading goes. The ramp is the scale's shape, not the
+    /// data — how far it is lit is the value — and the band over the last
+    /// sixth is painted into the face rather than derived from the reading.
+    private func drawRamTacho(_ value: Int?, used: String?, total: String?,
+                              left: CGFloat, right: CGFloat, in box: NSRect, dim: CGFloat) {
+        Gauge.label("ram", at: NSPoint(x: left, y: box.minY + 24), font: capsTiny,
                     color: VFD.label.withAlphaComponent(dim))
-        if let detail {
-            Gauge.label(detail, at: NSPoint(x: right, y: top), font: capsTiny,
-                        color: VFD.label.withAlphaComponent(0.85 * dim), alignRight: true)
+        if let used, let total {
+            Gauge.label("\(used) of \(total)", at: NSPoint(x: right, y: box.minY + 24),
+                        font: capsTiny, color: VFD.label.withAlphaComponent(0.85 * dim),
+                        alignRight: true)
         }
 
+        let colour = value.map { VFD.level(100 - $0) } ?? VFD.cyan
         let digits = value.map(String.init) ?? "--"
-        SevenSegment.draw(digits, at: NSPoint(x: left, y: top + 12), metrics: rowSeg,
+        SevenSegment.draw(digits, at: NSPoint(x: left, y: box.minY + 38), metrics: rowSeg,
                           lit: colour.withAlphaComponent(dim),
                           unlit: SevenSegment.ghost(VFD.cyan, metrics: rowSeg))
         Gauge.label("%", at: NSPoint(x: left + SevenSegment.width(digits, metrics: rowSeg) + 4,
-                                      y: top + 30),
+                                      y: box.minY + 56),
                     font: capsTiny, color: colour.withAlphaComponent(0.85 * dim))
 
-        // Widest numeral the row can show, so both bars share a left edge.
-        let barLeft = left + SevenSegment.width("100", metrics: rowSeg) + 22
-        Gauge.bar(in: NSRect(x: barLeft, y: top + 18, width: right - barLeft, height: 11),
-                  segments: 20, fraction: Double(value ?? 0) / 100,
-                  lit: colour.withAlphaComponent(dim),
-                  unlit: VFD.cyan.withAlphaComponent(0.10), gap: 2.4)
+        let baseline = box.minY + 116
+        let ticks = 36
+        let gap: CGFloat = 3.0
+        let tickWidth = (right - left - CGFloat(ticks - 1) * gap) / CGFloat(ticks)
+        let lit = Int((Double(ticks) * Double(value ?? 0) / 100).rounded())
+        let redline = Int(Double(ticks) * 0.85)
+
+        for index in 0..<ticks {
+            let ramp = CGFloat(index) / CGFloat(ticks - 1)
+            let height = 8 + 30 * ramp
+            let rect = NSRect(x: left + CGFloat(index) * (tickWidth + gap),
+                              y: baseline - height, width: tickWidth, height: height)
+            let band = index >= redline ? VFD.red : VFD.cyan
+            band.withAlphaComponent(index < lit ? 0.92 * dim : 0.10).setFill()
+            rect.fill()
+        }
+
+        VFD.hairline.withAlphaComponent(0.75 * dim).setFill()
+        NSRect(x: left, y: baseline + 2, width: right - left, height: 1).fill()
+
+        for step in stride(from: 0, through: 100, by: 10) {
+            let x = left + CGFloat(step) / 100 * (right - left)
+            let major = step % 20 == 0
+            VFD.hairline.withAlphaComponent((major ? 0.9 : 0.5) * dim).setFill()
+            NSRect(x: x, y: baseline + 3, width: 1, height: major ? 5 : 3).fill()
+            guard major else { continue }
+            let label = String(step)
+            let width = NSAttributedString(string: label,
+                                           attributes: [.font: capsTiny, .kern: 0.9]).size().width
+            Gauge.label(label, at: NSPoint(x: min(x - width / 2, right - width), y: baseline + 10),
+                        font: capsTiny, color: VFD.label.withAlphaComponent(0.7 * dim))
+        }
     }
 
     /// A boost-gauge face: ticks radiating round a 270° sweep, cool at the
