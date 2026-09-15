@@ -92,6 +92,19 @@ The reading refreshes every 30 seconds, including while network-backed cards are
 served from cache. `0` is valid. If process inspection fails, the card shows
 `--` / `STALE` rather than reusing a count as though it were current.
 
+## Merge history colour
+
+Columns are coloured against your own pace: cyan at or above the mean, amber
+down to half of it, red below. Height already says how a day compares to the
+week's peak, so keying colour off height too would have said nothing new — this
+way the shape answers "which day was biggest" and the colour answers "which
+days beat my average".
+
+The mean is taken over the *complete* days only, and today keeps the base
+colour rather than being judged against it. Today is still filling up; measured
+against a full day it would be red every morning, which is the same reason its
+column is already marked as the one not comparable to the six beside it.
+
 ## CPU and RAM
 
 The `system` card reads the machine the rest of this is running on. Both are

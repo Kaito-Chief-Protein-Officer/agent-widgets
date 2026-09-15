@@ -1733,6 +1733,21 @@ final class ClusterView: ThemeView {
         let barWidth = min(columnWidth - 14, 30)
         let peak = days.map(\.count).max() ?? 0
 
+        // Colour says how a day compares to your own pace; height already says
+        // how it compares to the week's peak, so keying colour off height too
+        // would have said nothing new. The pace is the mean of the *complete*
+        // days only — today is still filling up, and measuring a morning
+        // against a full day would paint it red every morning. For the same
+        // reason today keeps the base colour rather than being judged early.
+        let complete = days.dropLast().map(\.count)
+        let pace = complete.isEmpty ? 0 : Double(complete.reduce(0, +)) / Double(complete.count)
+        func colour(_ count: Int, isToday: Bool) -> NSColor {
+            guard pace > 0, !isToday else { return VFD.cyan }
+            if Double(count) >= pace { return VFD.cyan }
+            if Double(count) >= pace / 2 { return VFD.amber }
+            return VFD.red
+        }
+
         // Shared rail, labelled with the peak rather than a round number: the
         // scale is the week's own maximum, and printing it is what stops the
         // columns reading as percentages. A week with no merges has no range to
@@ -1759,19 +1774,20 @@ final class ClusterView: ThemeView {
         for (index, day) in days.enumerated() {
             let centre = left + (CGFloat(index) + 0.5) * columnWidth
             let isToday = index == days.count - 1
+            let lit = colour(day.count, isToday: isToday)
 
             Gauge.bar(in: NSRect(x: centre - barWidth / 2, y: top,
                                  width: barWidth, height: barHeight),
                       segments: 8,
                       fraction: peak > 0 ? Double(day.count) / Double(peak) : 0,
-                      lit: VFD.cyan.withAlphaComponent(dim),
+                      lit: lit.withAlphaComponent(dim),
                       unlit: VFD.cyan.withAlphaComponent(0.10), gap: 2.2, vertical: true)
 
             let text = String(day.count)
             let width = SevenSegment.width(text, metrics: tinySeg)
             SevenSegment.draw(text, at: NSPoint(x: centre - width / 2, y: top + barHeight + 8),
                               metrics: tinySeg,
-                              lit: VFD.cyan.withAlphaComponent((day.count == 0 ? 0.35 : 1) * dim),
+                              lit: lit.withAlphaComponent((day.count == 0 ? 0.35 : 1) * dim),
                               unlit: SevenSegment.ghost(VFD.cyan, metrics: tinySeg))
 
             let labelWidth = Gauge.label(day.label, at: NSPoint(x: 0, y: -200),
