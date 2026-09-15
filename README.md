@@ -94,16 +94,16 @@ served from cache. `0` is valid. If process inspection fails, the card shows
 
 ## Merge history colour
 
-A reward ladder on absolute counts: **over 20 goes neon green, over 30 goes
-violet and sparkles**, and anything below stays the ordinary cyan. Height still
-says how a day compares to the week's peak, so colour is free to say something
-else — which days were genuinely big ones.
+An absolute ladder: **under 10 is red**, the middle stays ordinary cyan, **over
+20 goes neon green** and **over 30 goes violet and sparkles**. Height still says
+how a day compares to the week's peak, so colour is free to say something else
+— which days were genuinely big ones and which barely moved.
 
-It is deliberately not a warning scale. A quiet day stays cyan rather than
-going amber, because there is nothing to fix about a quiet day, and that also
-lets today be coloured like any other column: it simply has not earned the step
-up yet. Neither neon nor violet carries status anywhere else on the panel, so
-they cannot be confused with the amber, red and magenta that do.
+Today is judged on the same scale as the rest, so it starts red and climbs
+through the day; its column carries the cursor marking it as the one not yet
+comparable to the six beside it. Neither neon nor violet carries status
+anywhere else on the panel, so they cannot be confused with the amber and
+magenta that do.
 
 The sparkle repaints a couple of segments near-white, seeded from the reading
 rather than from randomness — the panel redraws every 30s, and segments

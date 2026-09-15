@@ -1740,14 +1740,15 @@ final class ClusterView: ThemeView {
         let barWidth = min(columnWidth - 14, 30)
         let peak = days.map(\.count).max() ?? 0
 
-        // A reward ladder on absolute counts, not a warning scale: a quiet day
-        // stays the ordinary cyan rather than going amber, because there is
-        // nothing to fix about a quiet day. Only the good ones change colour,
-        // which also means today can be coloured like any other — it simply
-        // has not earned the step up yet.
+        // An absolute ladder: red under 10, ordinary cyan through the middle,
+        // then neon over 20 and sparkling violet over 30. Today is judged on
+        // the same scale as the rest — it is half a day, so it starts red and
+        // climbs, which is why its column also carries the cursor marking it
+        // as the one not yet comparable to the six beside it.
         func colour(_ count: Int) -> NSColor {
             if count > 30 { return VFD.violet }
             if count > 20 { return VFD.neon }
+            if count < 10 { return VFD.red }
             return VFD.cyan
         }
 
