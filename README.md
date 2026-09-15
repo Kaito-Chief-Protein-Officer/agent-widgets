@@ -92,6 +92,23 @@ The reading refreshes every 30 seconds, including while network-backed cards are
 served from cache. `0` is valid. If process inspection fails, the card shows
 `--` / `STALE` rather than reusing a count as though it were current.
 
+## Model colours
+
+Seven categorical slots, split five for cloud models and two for local ones,
+with everything else falling to the "Other" grey. The split exists because both
+cards share one palette and cloud traffic runs three orders of magnitude larger
+— ranked together, a local model that charts every day would never win a slot.
+
+A model keeps its hue once it has one, so a reshuffle never repaints the
+others. What decides who gets one is usage over the same 7-day window the card
+shows. That replaced first-sight-in-name-order, which spent the scarce slots on
+models that had run once and left models charting daily grey: of 18 models with
+recorded slots, the two largest on the mix card had landed at 10 and 12 and
+rendered as "Other".
+
+No slot is recorded when none is free, so a model that goes quiet and frees one
+can still be coloured later. Changing this rule re-seeds the palette once.
+
 ## Merge history colour
 
 An absolute ladder: **under 10 is red**, the middle stays ordinary cyan, **over

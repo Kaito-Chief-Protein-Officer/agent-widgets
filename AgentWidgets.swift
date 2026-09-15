@@ -985,17 +985,24 @@ enum VFD {
     /// two carry status here, and a model colour that looks like an alarm is a
     /// bug. Validated on #050505 — CVD ΔE 12.1, normal-vision 16.0, all ≥ 3:1.
     /// (Only the lightness band fails, which is the VFD-brightness departure.)
+    ///
+    /// Order matters. Slots 0-4 go to cloud models and 5-6 to local ones, so
+    /// the first four — the ones the mix card shows together — are the widest
+    /// apart the remaining hue space allows: cyan, lime, blue, lilac. Teal and
+    /// periwinkle are held back to the local range precisely because each sits
+    /// close to one of those four, and on the local card neither has to.
+    ///
+    /// It stops at seven. After amber, magenta and red are reserved for status
+    /// what is left is green→cyan→blue→violet, and an eighth entry would have
+    /// to sit near enough an existing one to be guessed at rather than read.
     static let series = [
         NSColor(srgbRed: 0x3B / 255, green: 0xE8 / 255, blue: 0xD8 / 255, alpha: 1),
         NSColor(srgbRed: 0x9B / 255, green: 0xE8 / 255, blue: 0x4F / 255, alpha: 1),
         NSColor(srgbRed: 0x5A / 255, green: 0x8C / 255, blue: 0xFF / 255, alpha: 1),
-        // Teal sits at index 3 on purpose. Slots are assigned to models on first
-        // sight and persisted, and this machine's slot 3 holds a local model —
-        // so on the mix, the four hues that appear together are the
-        // widely-separated ones and teal never has to sit beside cyan. It does
-        // chart, on the local card, where cyan is not in play.
-        NSColor(srgbRed: 0x40 / 255, green: 0xB0 / 255, blue: 0xA0 / 255, alpha: 1),
         NSColor(srgbRed: 0xD9 / 255, green: 0xA8 / 255, blue: 0xFF / 255, alpha: 1),
+        NSColor(srgbRed: 0x35 / 255, green: 0xC4 / 255, blue: 0x6E / 255, alpha: 1),
+        NSColor(srgbRed: 0x40 / 255, green: 0xB0 / 255, blue: 0xA0 / 255, alpha: 1),
+        NSColor(srgbRed: 0x8F / 255, green: 0x7B / 255, blue: 0xFF / 255, alpha: 1),
     ]
     /// Only the "Other" bucket, never a named model.
     static let otherGrey = NSColor(srgbRed: 0x7A / 255, green: 0x8A / 255, blue: 0x90 / 255, alpha: 1)

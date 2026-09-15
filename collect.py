@@ -619,7 +619,11 @@ CODEX_LOG_ROOT = os.path.expanduser("~/.codex/sessions")
 MODEL_WINDOW_DAYS = 7
 MODEL_RETENTION_DAYS = 30
 MODEL_ROWS = 4  # rows rendered; the rest fold into "Other"
-MODEL_SLOTS = 5  # categorical colour slots before a model gets the "Other" grey
+MODEL_SLOTS = 7  # categorical colour slots before a model gets the "Other" grey
+# The mix card shows four named models and the local card three, and they share
+# one palette. Splitting it keeps a quiet local model from being crowded out by
+# cloud traffic three orders of magnitude larger.
+CLOUD_SLOTS = 5
 
 MODEL_LABELS = {
     "claude-opus-5": "Opus 5",
@@ -971,15 +975,41 @@ def model_index():
 
     index["local_ids"] = sorted(local_ids(index))
 
-    # Colour follows the model, not its rank or its card: slots are assigned on
-    # first sight and persisted, so a reshuffle never repaints the others and a
-    # model keeps its hue wherever it appears.
-    for store in (files, local_files, {"opencode": index["opencode"]}):
-        for entry in store.values():
-            for models in (entry.get("days") or {}).values():
-                for model in sorted(models):
-                    if model not in palette:
-                        palette[model] = len(palette)
+    # Colour follows the model, not its rank or its card: once a model holds a
+    # slot it keeps it, so a reshuffle never repaints the others and a model
+    # keeps its hue wherever it appears. What changed is who gets one first.
+    # Assigning on first sight in name order spent the scarce slots on models
+    # that had run once, and left models charting every day grey.
+    cutoff = window_cutoff(MODEL_WINDOW_DAYS)
+
+    def windowed(stores):
+        totals = {}
+        for store in stores:
+            for entry in store.values():
+                for day, models in (entry.get("days") or {}).items():
+                    if day < cutoff:
+                        continue
+                    for model, tokens in models.items():
+                        totals[model] = totals.get(model, 0) + (tokens or 0)
+        return sorted(totals, key=lambda model: (-totals[model], model))
+
+    taken = set(palette.values())
+
+    def grant(models, slots):
+        for model in models:
+            if model in palette:
+                continue
+            free = next((slot for slot in slots if slot not in taken), None)
+            # No slot is recorded when none is free, so a model that goes quiet
+            # and frees one later can still be coloured. Unassigned reads grey.
+            if free is None:
+                return
+            palette[model] = free
+            taken.add(free)
+
+    grant(windowed([files]), range(CLOUD_SLOTS))
+    grant(windowed([local_files, {"opencode": index["opencode"]}]),
+          range(CLOUD_SLOTS, MODEL_SLOTS))
 
     write_json(MODELS_INDEX_FILE, index)
     _run_cache["index"] = index
