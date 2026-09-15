@@ -94,16 +94,20 @@ served from cache. `0` is valid. If process inspection fails, the card shows
 
 ## Merge history colour
 
-Columns are coloured against your own pace: cyan at or above the mean, amber
-down to half of it, red below. Height already says how a day compares to the
-week's peak, so keying colour off height too would have said nothing new — this
-way the shape answers "which day was biggest" and the colour answers "which
-days beat my average".
+A reward ladder on absolute counts: **over 20 goes neon green, over 30 goes
+violet and sparkles**, and anything below stays the ordinary cyan. Height still
+says how a day compares to the week's peak, so colour is free to say something
+else — which days were genuinely big ones.
 
-The mean is taken over the *complete* days only, and today keeps the base
-colour rather than being judged against it. Today is still filling up; measured
-against a full day it would be red every morning, which is the same reason its
-column is already marked as the one not comparable to the six beside it.
+It is deliberately not a warning scale. A quiet day stays cyan rather than
+going amber, because there is nothing to fix about a quiet day, and that also
+lets today be coloured like any other column: it simply has not earned the step
+up yet. Neither neon nor violet carries status anywhere else on the panel, so
+they cannot be confused with the amber, red and magenta that do.
+
+The sparkle repaints a couple of segments near-white, seeded from the reading
+rather than from randomness — the panel redraws every 30s, and segments
+twinkling on an unchanged number would read as data moving when it had not.
 
 ## CPU and RAM
 

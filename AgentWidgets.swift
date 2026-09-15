@@ -974,6 +974,13 @@ enum VFD {
     /// beside the source lamps — so the two would collide on the same surface.
     static let red = NSColor(srgbRed: 0xFF / 255, green: 0x4A / 255, blue: 0x3D / 255, alpha: 1)
 
+    /// Reward colours for the merge histogram, and used nowhere else. Neither
+    /// carries status: nothing on this panel goes neon or violet to warn you,
+    /// so they cannot be mistaken for the amber/red/magenta that do.
+    static let neon = NSColor(srgbRed: 0x4B / 255, green: 0xFF / 255, blue: 0x7A / 255, alpha: 1)
+    static let violet = NSColor(srgbRed: 0xB4 / 255, green: 0x6B / 255, blue: 0xFF / 255, alpha: 1)
+    static let violetSpark = NSColor(srgbRed: 0xF0 / 255, green: 0xDC / 255, blue: 0xFF / 255, alpha: 1)
+
     /// Model-mix palette. Deliberately contains no amber and no magenta: those
     /// two carry status here, and a model colour that looks like an alarm is a
     /// bug. Validated on #050505 — CVD ΔE 12.1, normal-vision 16.0, all ≥ 3:1.
@@ -1733,19 +1740,15 @@ final class ClusterView: ThemeView {
         let barWidth = min(columnWidth - 14, 30)
         let peak = days.map(\.count).max() ?? 0
 
-        // Colour says how a day compares to your own pace; height already says
-        // how it compares to the week's peak, so keying colour off height too
-        // would have said nothing new. The pace is the mean of the *complete*
-        // days only — today is still filling up, and measuring a morning
-        // against a full day would paint it red every morning. For the same
-        // reason today keeps the base colour rather than being judged early.
-        let complete = days.dropLast().map(\.count)
-        let pace = complete.isEmpty ? 0 : Double(complete.reduce(0, +)) / Double(complete.count)
-        func colour(_ count: Int, isToday: Bool) -> NSColor {
-            guard pace > 0, !isToday else { return VFD.cyan }
-            if Double(count) >= pace { return VFD.cyan }
-            if Double(count) >= pace / 2 { return VFD.amber }
-            return VFD.red
+        // A reward ladder on absolute counts, not a warning scale: a quiet day
+        // stays the ordinary cyan rather than going amber, because there is
+        // nothing to fix about a quiet day. Only the good ones change colour,
+        // which also means today can be coloured like any other — it simply
+        // has not earned the step up yet.
+        func colour(_ count: Int) -> NSColor {
+            if count > 30 { return VFD.violet }
+            if count > 20 { return VFD.neon }
+            return VFD.cyan
         }
 
         // Shared rail, labelled with the peak rather than a round number: the
@@ -1774,14 +1777,21 @@ final class ClusterView: ThemeView {
         for (index, day) in days.enumerated() {
             let centre = left + (CGFloat(index) + 0.5) * columnWidth
             let isToday = index == days.count - 1
-            let lit = colour(day.count, isToday: isToday)
+            let lit = colour(day.count)
+            let column = NSRect(x: centre - barWidth / 2, y: top,
+                                width: barWidth, height: barHeight)
 
-            Gauge.bar(in: NSRect(x: centre - barWidth / 2, y: top,
-                                 width: barWidth, height: barHeight),
-                      segments: 8,
+            Gauge.bar(in: column, segments: 8,
                       fraction: peak > 0 ? Double(day.count) / Double(peak) : 0,
                       lit: lit.withAlphaComponent(dim),
                       unlit: VFD.cyan.withAlphaComponent(0.10), gap: 2.2, vertical: true)
+            if lit == VFD.violet {
+                sparkle(column, segments: 8, gap: 2.2,
+                        litCount: peak > 0
+                            ? max(1, Int((8 * Double(day.count) / Double(peak)).rounded()))
+                            : 0,
+                        seed: day.count &+ index, dim: dim)
+            }
 
             let text = String(day.count)
             let width = SevenSegment.width(text, metrics: tinySeg)
@@ -1801,6 +1811,29 @@ final class ClusterView: ThemeView {
                 NSRect(x: centre - labelWidth / 2 - 1, y: top + barHeight + 44,
                        width: labelWidth + 2, height: 1.5).fill()
             }
+        }
+    }
+
+    /// Glitter on a column that cleared 30: a couple of its segments are
+    /// repainted near-white. The seed is derived from the reading rather than
+    /// taken at random, so the same snapshot always sparkles the same way —
+    /// the panel redraws every 30s, and segments twinkling on an unchanged
+    /// number would read as data moving when it had not.
+    private func sparkle(_ column: NSRect, segments: Int, gap: CGFloat,
+                         litCount: Int, seed: Int, dim: CGFloat) {
+        guard litCount > 0 else { return }
+        let span = column.height - CGFloat(segments - 1) * gap
+        let size = span / CGFloat(segments)
+        guard size > 0 else { return }
+
+        var state = UInt64(truncatingIfNeeded: seed) &* 6364136223846793005 &+ 1442695040888963407
+        for _ in 0..<min(2, litCount) {
+            state = state &* 6364136223846793005 &+ 1442695040888963407
+            let index = Int(state >> 33) % litCount
+            let offset = CGFloat(index) * (size + gap)
+            VFD.violetSpark.withAlphaComponent(0.95 * dim).setFill()
+            NSRect(x: column.minX, y: column.maxY - offset - size,
+                   width: column.width, height: size).fill()
         }
     }
 
