@@ -132,7 +132,7 @@ The `system` card reads the machine the rest of this is running on. Both are
 **load, not budget**, so the colour ramp runs backwards from every other gauge
 here — a full bar is the bad end.
 
-The cluster row runs CPU dial, RAM wedge, network numbers. CPU is the twitchy
+The cluster row runs two dials (CPU, GPU), the RAM wedge, then a column of numbers. CPU is the twitchy
 one read at a glance, so it keeps the needle: a boost-gauge face with ticks
 radiating round a 270° sweep, cool at the bottom of the range and red at the
 top, and the reading repeated digitally *below* the face — below rather than
@@ -147,6 +147,26 @@ The ramp is the scale's shape, not the data.
 Ping and throughput are plain numbers in their own column. Latency barely
 moves and throughput is spiky and unbounded, so neither earns a face — and
 giving them a column is what keeps the wedge from eating the row.
+
+**GPU** is `ioreg`'s IOAccelerator "Device Utilization %" — the number Activity
+Monitor's GPU History draws, readable without sudo, ~20ms. It gets its own dial
+beside CPU because the two compute engines are the pair you glance between.
+
+**Temperature and throttle** are read in the Swift renderer, not the collector,
+because the cheap paths are IOKit calls rather than shell commands. Temperature
+is the hottest on-die (`tdie`) sensor via the private `IOHIDEventSystemClient`
+interface — the same one every no-sudo Mac temperature tool uses, bound by
+symbol since there is no public header. Throttle state is the public
+`ProcessInfo.thermalState`: **nominal** and **fair** are both healthy (fair is
+common and harmless), and only **serious** or **critical** read as
+*throttling*, which is macOS's own signal that it is actively slowing the
+machine down. Both are live "now" readings taken at draw time, so they never
+enter the 30s cache.
+
+There is deliberately no **NPU / ANE** gauge. The Neural Engine exposes no
+utilization counter without `sudo powermetrics`, and a login-launched widget
+should not carry a sudo dependency — the same call that ruled out Wi-Fi link
+rate.
 
 **Ping** is a single ICMP round trip to `1.1.1.1` — a fixed address rather than
 a hostname, so DNS latency is not folded into a number meant to describe the

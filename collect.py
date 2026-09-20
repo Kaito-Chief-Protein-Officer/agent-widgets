@@ -454,6 +454,23 @@ def fetch_agents():
     }
 
 
+def gpu_percent():
+    """Busy percent of the integrated GPU, or None if it cannot be read.
+
+    `ioreg` exposes IOAccelerator's PerformanceStatistics without sudo; the
+    "Device Utilization %" field is the same number Activity Monitor's GPU
+    History draws. Costs ~20ms. A machine can list more than one accelerator,
+    so the busiest wins rather than the first found.
+    """
+    try:
+        out = subprocess.run(["/usr/sbin/ioreg", "-r", "-c", "IOAccelerator", "-d1"],
+                             capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return None
+    values = [int(m) for m in re.findall(r'"Device Utilization %"=(\d+)', out)]
+    return max(values) if values else None
+
+
 def cpu_percent(ps_output=None):
     """Busy percent across all cores.
 
@@ -589,6 +606,9 @@ def fetch_system():
         {"label": "ram_used", "value": compact_bytes(used)},
         {"label": "ram_total", "value": compact_bytes(total)},
     ]
+    gpu = gpu_percent()
+    if gpu is not None:
+        stats.append({"label": "gpu", "value": str(gpu)})
     latency = ping_ms()
     if latency is not None:
         stats.append({"label": "ping", "value": str(latency)})

@@ -7,6 +7,66 @@
 
 import AppKit
 import Carbon.HIToolbox
+import IOKit
+
+// MARK: - System sensors
+//
+// Temperature and thermal-throttle state are read here rather than in
+// collect.py: the cheap paths are IOKit calls, not shell commands, and the
+// collector is kept stdlib-and-subprocess only. Both are live "now" readings
+// like the reset countdowns, so they are taken at draw time and never cached.
+//
+// The temperature side uses the private IOHIDEventSystemClient interface —
+// the same one every no-sudo Mac temperature tool uses — bound by symbol
+// because there is no public header. It reads the on-die (`tdie`) sensors and
+// reports the hottest, which is what a thermal readout is asking for. Throttle
+// state comes from the public `ProcessInfo.thermalState`, which is macOS's own
+// signal: serious or critical means the OS is actively slowing things down.
+
+@_silgen_name("IOHIDEventSystemClientCreate")
+private func IOHIDEventSystemClientCreate(_ allocator: CFAllocator?) -> CFTypeRef?
+@_silgen_name("IOHIDEventSystemClientSetMatching")
+private func IOHIDEventSystemClientSetMatching(_ client: CFTypeRef?, _ match: CFDictionary?)
+@_silgen_name("IOHIDEventSystemClientCopyServices")
+private func IOHIDEventSystemClientCopyServices(_ client: CFTypeRef?) -> CFArray?
+@_silgen_name("IOHIDServiceClientCopyEvent")
+private func IOHIDServiceClientCopyEvent(_ service: CFTypeRef?, _ type: Int64,
+                                         _ options: Int32, _ timeout: Int64) -> CFTypeRef?
+@_silgen_name("IOHIDEventGetFloatValue")
+private func IOHIDEventGetFloatValue(_ event: CFTypeRef?, _ field: Int32) -> Double
+
+enum SystemSensors {
+    private static let temperatureEventType: Int64 = 15  // kIOHIDEventTypeTemperature
+
+    /// Hottest on-die reading in °C, or nil if the sensors cannot be reached.
+    static func peakTemperature() -> Int? {
+        let match: [String: Int] = ["PrimaryUsagePage": 0xff00, "PrimaryUsage": 5]
+        guard let client = IOHIDEventSystemClientCreate(kCFAllocatorDefault) else { return nil }
+        IOHIDEventSystemClientSetMatching(client, match as CFDictionary)
+        guard let services = IOHIDEventSystemClientCopyServices(client) as? [CFTypeRef] else {
+            return nil
+        }
+        let field = Int32(temperatureEventType << 16)
+        var peak: Double = 0
+        for service in services {
+            guard let event = IOHIDServiceClientCopyEvent(service, temperatureEventType, 0, 0)
+            else { continue }
+            peak = max(peak, IOHIDEventGetFloatValue(event, field))
+        }
+        return peak > 0 ? Int(peak.rounded()) : nil
+    }
+
+    /// (word, colour, throttling). Nominal and fair are both healthy — fair is
+    /// common and harmless — so only serious and critical read as throttling.
+    static func thermal() -> (word: String, colour: NSColor, throttling: Bool) {
+        switch ProcessInfo.processInfo.thermalState {
+        case .serious: return ("throttling", VFD.amber, true)
+        case .critical: return ("throttling", VFD.red, true)
+        case .fair: return ("fair", VFD.cyan, false)
+        default: return ("nominal", VFD.cyan, false)
+        }
+    }
+}
 
 // MARK: - Model
 
@@ -578,8 +638,12 @@ final class PanelView: ThemeView {
         if card.isPRs { return height + prsHeight(card) }
         if card.isAgents { return height + 38 }
         if card.isSystem {
-            let row = Style.meterLabel.pointSize + Style.labelGap + Style.trackHeight
-            return height + 2 * row + Style.meterGap
+            let bar = Style.meterLabel.pointSize + Style.labelGap + Style.trackHeight
+            let bars = card.stats.contains { $0.label == "gpu" } ? 3 : 2
+            let line = Style.meterLabel.pointSize + Style.labelGap
+            // cpu/ram(/gpu) bars, then temp and thermal as two text lines.
+            return height + CGFloat(bars) * bar + CGFloat(bars - 1) * Style.meterGap
+                + Style.meterGap + 2 * line
         }
 
         let rows = visibleMeters(card)
@@ -843,9 +907,12 @@ final class PanelView: ThemeView {
             text("ram_total").map { "\(used) of \($0)" }
         }
 
+        var bars: [(String, Int?, String?)] = [("cpu", reading("cpu"), nil),
+                                                ("ram", reading("ram"), footprint)]
+        if let gpu = reading("gpu") { bars.append(("gpu", gpu, nil)) }
+
         var y = y
-        for (index, row) in [("cpu", reading("cpu"), nil),
-                             ("ram", reading("ram"), footprint)].enumerated() {
+        for (index, row) in bars.enumerated() {
             let (name, used, detail) = row
             if index > 0 { y += Style.meterGap }
 
@@ -880,6 +947,26 @@ final class PanelView: ThemeView {
                 filled.fill()
             }
             y += Style.trackHeight
+        }
+
+        // Temperature and throttle state, read live rather than from the card.
+        let temp = SystemSensors.peakTemperature()
+        let thermal = SystemSensors.thermal()
+        let lines: [(String, String, NSColor)] = [
+            ("temp", temp.map { "\($0)°C" } ?? "—",
+             temp.map { $0 >= 95 ? Style.warn : Style.primary } ?? Style.secondary),
+            ("thermal", thermal.word,
+             thermal.throttling ? Style.warn : Style.secondary),
+        ]
+        for (name, value, colour) in lines {
+            y += Style.meterGap
+            drawText(name, font: Style.meterLabel,
+                     color: Style.secondary.withAlphaComponent(0.62 * dim),
+                     at: NSPoint(x: left, y: y))
+            let text = NSAttributedString(string: value, attributes: [
+                .font: Style.pct, .foregroundColor: colour.withAlphaComponent(0.92 * dim)])
+            text.draw(at: NSPoint(x: right - text.size().width, y: y))
+            y += Style.meterLabel.pointSize + Style.labelGap
         }
         return y
     }
@@ -1865,33 +1952,45 @@ final class ClusterView: ThemeView {
             card?.stats.first { $0.label == name }?.value
         }
 
-        let dialColumn: CGFloat = 140
-        let netColumn: CGFloat = 120
+        // CPU and GPU are the two compute engines, both twitchy, so they sit
+        // side by side as a matched pair of dials on the left.
+        let dialColumn: CGFloat = 116
+        let netColumn: CGFloat = 118
         drawDial(reading("cpu"), scaleMax: 100, unit: "% cpu", warn: 0.6, danger: 0.8,
-                 centre: NSPoint(x: box.minX + 14 + dialColumn / 2, y: box.minY + 66),
-                 radius: 44, dim: dim, readoutY: box.minY + 106)
+                 centre: NSPoint(x: box.minX + 14 + dialColumn / 2, y: box.minY + 58),
+                 radius: 38, dim: dim, readoutY: box.minY + 100)
+        drawDial(reading("gpu"), scaleMax: 100, unit: "% gpu", warn: 0.6, danger: 0.8,
+                 centre: NSPoint(x: box.minX + 14 + dialColumn + dialColumn / 2, y: box.minY + 58),
+                 radius: 38, dim: dim, readoutY: box.minY + 100)
 
-        let left = box.minX + 14 + dialColumn + 26
-        let right = box.maxX - 14 - netColumn - 26
+        let left = box.minX + 14 + dialColumn * 2 + 22
+        let right = box.maxX - 14 - netColumn - 22
         drawRamTacho(reading("ram"), used: text("ram_used"), total: text("ram_total"),
                      left: left, right: right, in: box, dim: dim)
 
+        // Temperature and throttle are read live here, not from the card.
+        let temp = SystemSensors.peakTemperature()
+        let thermal = SystemSensors.thermal()
+        let tempColour: NSColor = temp.map { $0 >= 95 ? VFD.red : ($0 >= 80 ? VFD.amber : VFD.cyan) }
+            ?? VFD.cyan
         let netLeft = box.maxX - 14 - netColumn
         let netRight = box.maxX - 14
-        let rows: [(String, String?)] = [
-            ("ping", text("ping").map { "\($0) ms" }),
-            ("down", text("net_down")),
-            ("up", text("net_up")),
+        let rows: [(String, String?, NSColor)] = [
+            ("ping", text("ping").map { "\($0) ms" }, VFD.cyan),
+            ("down", text("net_down"), VFD.cyan),
+            ("up", text("net_up"), VFD.cyan),
+            ("temp", temp.map { "\($0)°C" }, tempColour),
+            ("thermal", thermal.word, thermal.colour),
         ]
         for (index, row) in rows.enumerated() {
-            let y = box.minY + 30 + CGFloat(index) * 26
+            let y = box.minY + 22 + CGFloat(index) * 23
             Gauge.label(row.0, at: NSPoint(x: netLeft, y: y), font: capsTiny,
                         color: VFD.label.withAlphaComponent(0.7 * dim))
             Gauge.label(row.1 ?? "—", at: NSPoint(x: netRight, y: y), font: capsSmall,
-                        color: VFD.cyan.withAlphaComponent(0.9 * dim), alignRight: true)
+                        color: row.2.withAlphaComponent(0.9 * dim), alignRight: true)
             if index < rows.count - 1 {
                 VFD.hairline.withAlphaComponent(0.4 * dim).setFill()
-                NSRect(x: netLeft, y: y + 17, width: netColumn, height: 1).fill()
+                NSRect(x: netLeft, y: y + 15, width: netColumn, height: 1).fill()
             }
         }
     }
