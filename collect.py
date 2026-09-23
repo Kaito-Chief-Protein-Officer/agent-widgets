@@ -2,10 +2,17 @@
 """Collect Claude Code + Codex usage into a sanitized cache for desktop widgets.
 
 Prints only the sanitized cache JSON on stdout. Diagnostics go to stderr.
-Never writes tokens, emails or account identifiers to the cache file.
+Never writes tokens or refresh tokens to the cache file.
+
+The cache does carry the local part of each account's address, because with
+several accounts per provider it is the only thing that tells two of them
+apart — a role like "personal" is worn by more than one. It is derived from
+the provider rather than configured, so accounts.json (which is committed)
+stays free of it. Domains are dropped; cache.json is git-ignored.
 """
 
 import argparse
+import base64
 import json
 import os
 import re
@@ -30,6 +37,7 @@ STATUS_MARK = "__agent_widgets_status__"
 HEADER_MARK = "__agent_widgets_headers__"
 
 ANTHROPIC_URL = "https://api.anthropic.com/api/oauth/usage"
+ANTHROPIC_PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"
 ANTHROPIC_BETA = "oauth-2025-04-20"
 KEYCHAIN_SERVICE = "Claude Code-credentials"
 # One Claude card per signed-in account. Claude Code keeps one login per
@@ -141,9 +149,10 @@ def claude_accounts():
     """Accounts from accounts.json, validated; the default login if absent.
 
     Each entry: {"id", "label", "config_dir", "keychain_service"?}. The id is
-    the card id (so `--simulate reauth:<id>` works) and the label is what the
-    panel prints — pick something that is not an email address, because the
-    cache is meant to stay free of identity.
+    the card id (so `--simulate reauth:<id>` works) and the label is the role
+    the panel prints — "personal", "team". Leave the address out: the
+    collector appends it from the provider, so this file (which is committed)
+    never has to hold one, and a typo here cannot mislabel an account.
     """
     config = read_json(ACCOUNTS_FILE) or {}
     accounts = []
@@ -277,6 +286,20 @@ def codex_accounts():
     return accounts or [dict(account) for account in DEFAULT_CODEX_ACCOUNTS]
 
 
+def codex_email(account):
+    """-> the address in this home's id_token, or None. Local only; the token
+    is already on disk and nothing leaves the machine to read it."""
+    path = os.path.join(os.path.expanduser(account["codex_home"]), "auth.json")
+    try:
+        with open(path) as handle:
+            raw = (json.load(handle).get("tokens") or {}).get("id_token") or ""
+        payload = raw.split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        return claims.get("email")
+    except Exception:
+        return None
+
+
 def codex_credentials(account):
     """-> (access token, ChatGPT account id) for one login, or (None, None)."""
     path = os.path.join(os.path.expanduser(account["codex_home"]), "auth.json")
@@ -306,6 +329,32 @@ def iso_to_epoch(value):
         return None
 
 
+# Org uuids already claimed this run. Two config dirs can hold tokens for the
+# same org — signing in twice picks up whatever session the browser already
+# had — and the usage endpoint cannot tell them apart, because it reports
+# windows and no identity at all. Without this the panel draws the same
+# account twice and looks like two.
+_claimed_orgs = {}
+
+
+def claude_identity(oauth):
+    """-> (email, org uuid, org name) for one token, or (None, None, None).
+
+    The usage response carries no identity, so the label a card prints and any
+    duplicate check both have to come from here.
+    """
+    try:
+        data = get_json(
+            ANTHROPIC_PROFILE_URL,
+            {"Authorization": f"Bearer {oauth['accessToken']}",
+             "anthropic-beta": ANTHROPIC_BETA},
+        )
+    except Exception:
+        return None, None, None
+    org = data.get("organization") or {}
+    return (data.get("account") or {}).get("email"), org.get("uuid"), org.get("name")
+
+
 def fetch_claude(account):
     oauth = claude_credentials(account)
     if not oauth:
@@ -327,10 +376,25 @@ def fetch_claude(account):
                 "resets_at": iso_to_epoch(window.get("resets_at")),
             }
         )
+    email, org_uuid, _ = claude_identity(oauth)
+    # The address is what separates two accounts wearing the same role, so it
+    # rides in the label rather than sitting in accounts.json, where it would
+    # be a hand-typed string nobody can verify.
+    label = account["label"]
+    if email:
+        label = f"{label} · {email.split('@')[0]}@"
+    note = None
+    if org_uuid:
+        first = _claimed_orgs.setdefault(org_uuid, account["id"])
+        if first != account["id"]:
+            note = f"same org as {first}"
+            warn(f"{account['id']}: duplicate of {first} (org {org_uuid})")
+
     return {
         "id": account["id"],
         "provider": "claude",
-        "label": account["label"],
+        "label": label,
+        "note": note,
         # Anthropic's usage response carries no plan field; the tier comes
         # from the credential block Claude Code stores alongside the token.
         "sub": claude_plan(oauth),
@@ -371,10 +435,14 @@ def fetch_codex(account):
             }
         )
     plan = data.get("plan_type")
+    email = data.get("email") or codex_email(account)
+    label = account["label"]
+    if email:
+        label = f"{label} · {email.split('@')[0]}@"
     return {
         "id": account["id"],
         "provider": "codex",
-        "label": account["label"],
+        "label": label,
         "sub": str(plan) if plan else None,
         "kind": "meters",
         "meters": meters,
@@ -1434,6 +1502,7 @@ def fetch_garmin():
 def providers():
     """Card order. Claude then Codex accounts, in accounts.json order."""
     _claimed_services.clear()
+    _claimed_orgs.clear()
     cards = [("agents", fetch_agents)]
     for account in claude_accounts():
         cards.append((account["id"], (lambda acct: lambda: fetch_claude(acct))(account)))

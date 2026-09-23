@@ -1119,7 +1119,7 @@ final class ClusterView: ThemeView {
     override var backdropColor: NSColor { NSColor(srgbRed: 0.02, green: 0.02, blue: 0.024, alpha: 0.97) }
     override var cornerRadius: CGFloat { 8 }
     override var borderColor: NSColor { VFD.hairline.withAlphaComponent(0.5) }
-    override var fittingHeight: CGFloat { 768 }
+    override var fittingHeight: CGFloat { 828 }
 
     private let pad: CGFloat = 12
 
@@ -1138,6 +1138,11 @@ final class ClusterView: ThemeView {
     // its % clear half the box.
     private let twinSeg = SevenSegment.Metrics(width: 26, height: 54, thickness: 7.0,
                                                gap: 1.8, slant: 0.09, spacing: 6.5)
+    // Third-width hero. A third of the face cannot hold `twinSeg` proportions,
+    // so this digit is narrow and tall instead of small: "100" and its % still
+    // clear the dial, and the numeral keeps most of the twin's height.
+    private let tripleSeg = SevenSegment.Metrics(width: 17, height: 46, thickness: 4.8,
+                                                 gap: 1.5, slant: 0.09, spacing: 4.5)
     private let rowSeg = SevenSegment.Metrics(width: 18, height: 30, thickness: 4.1,
                                               gap: 1.2, slant: 0.09, spacing: 4.5)
     private let midSeg = SevenSegment.Metrics(width: 18, height: 30, thickness: 3.9,
@@ -1162,21 +1167,23 @@ final class ClusterView: ThemeView {
         // Left column is budget; right side is body and model mix.
         let heroBox = NSRect(x: 12, y: 14, width: 280, height: 158)
         let rampBox = NSRect(x: 304, y: 14, width: 384, height: 158)
-        let quotaBox = NSRect(x: 12, y: 186, width: 280, height: 140)
-        let vitalsBox = NSRect(x: 304, y: 186, width: 180, height: 140)
-        let readBox = NSRect(x: 496, y: 186, width: 192, height: 140)
+        // The second row is sized by the quota box: it carries one odometer
+        // row per signed-in account, and five of them need the height.
+        let quotaBox = NSRect(x: 12, y: 186, width: 280, height: 200)
+        let vitalsBox = NSRect(x: 304, y: 186, width: 180, height: 200)
+        let readBox = NSRect(x: 496, y: 186, width: 192, height: 200)
         // Third row follows the same column grid as the first: the counter sits
         // under the hero, the histogram under the tacho.
-        let agentsBox = NSRect(x: 12, y: 340, width: 112, height: 116)
-        let mergeBox = NSRect(x: 136, y: 340, width: 156, height: 116)
-        let historyBox = NSRect(x: 304, y: 340, width: 384, height: 116)
+        let agentsBox = NSRect(x: 12, y: 400, width: 112, height: 116)
+        let mergeBox = NSRect(x: 136, y: 400, width: 156, height: 116)
+        let historyBox = NSRect(x: 304, y: 400, width: 384, height: 116)
         // Fourth row, full width: local models are a list of named things with
         // a size and a count each, not a single reading, so they get the whole
         // width rather than a cell in the column grid.
-        let localBox = NSRect(x: 12, y: 470, width: 676, height: 120)
+        let localBox = NSRect(x: 12, y: 530, width: 676, height: 120)
         // Fifth row: the machine the rest of this is running on. Two readings,
         // so they sit side by side rather than taking a column cell each.
-        let systemBox = NSRect(x: 12, y: 604, width: 676, height: 150)
+        let systemBox = NSRect(x: 12, y: 664, width: 676, height: 150)
 
         for box in [heroBox, rampBox, quotaBox, vitalsBox, readBox, agentsBox, mergeBox,
                     historyBox, localBox, systemBox] {
@@ -1236,12 +1243,12 @@ final class ClusterView: ThemeView {
     }
 
     /// Hero numeral: the Claude 5h window, the number checked most often. With
-    /// two accounts signed in the face splits into a twin speedo, one dial per
+    /// more than one account signed in the face splits, one dial per
     /// subscription — "which one is nearly empty" is then the question.
     private func drawSpeedo(_ snapshot: Snapshot, in box: NSRect) {
         let accounts = snapshot.cards(provider: "claude")
         if accounts.count >= 2 {
-            drawTwinSpeedo(Array(accounts.prefix(2)), in: box)
+            drawSplitSpeedo(accounts, in: box)
             return
         }
         let card = accounts.first
@@ -1284,58 +1291,94 @@ final class ClusterView: ThemeView {
                     alignRight: true)
     }
 
-    /// Two dials on one face. Each keeps the single hero's anatomy — numeral,
-    /// bar, reset — at half width, with the account name and plan tier where
-    /// the single dial has "5h remaining". A dial in a fault state dims and
-    /// wears its state word alone; the other dial is unaffected.
-    private func drawTwinSpeedo(_ accounts: [Card], in box: NSRect) {
-        title("claude code", in: box, dim: 1, tag: "5h window")
+    /// Two or three dials on one face. Each keeps the single hero's anatomy —
+    /// numeral, bar, reset — at its share of the width, with the account name
+    /// and plan tier where the single dial has "5h remaining". A dial in a
+    /// fault state dims and wears its state word alone; the others are
+    /// unaffected. Three is what the face holds: a fourth account is counted
+    /// in the title rather than dropped from it.
+    /// A dial gets a third of the face, which is narrower than an address.
+    /// The odometer rows below carry the full `role · email@`, so up here the
+    /// address is reduced to the initials of its local part — enough to tell
+    /// two accounts of the same role apart, which is the only job this label
+    /// has once the rows underneath spell them out.
+    private static func heroLabel(_ label: String) -> String {
+        let parts = label.components(separatedBy: " · ")
+        guard parts.count == 2 else { return label }
+        let initials = parts[1]
+            .replacingOccurrences(of: "@", with: "")
+            .components(separatedBy: ".")
+            .compactMap { $0.first.map(String.init) }
+            .joined()
+        return initials.isEmpty ? parts[0] : "\(parts[0]) · \(initials)"
+    }
+
+    private func drawSplitSpeedo(_ accounts: [Card], in box: NSRect) {
+        let dials = Array(accounts.prefix(3))
+        let hidden = accounts.count - dials.count
+        title("claude code", in: box, dim: 1,
+              tag: hidden > 0 ? "5h · +\(hidden)" : "5h window")
 
         let left = box.minX + 16
         let right = box.maxX - 16
-        let gutter: CGFloat = 16
-        let width = (right - left - gutter) / 2
+        // A third dial buys its width from the gutters as well as the numeral.
+        let triple = dials.count > 2
+        let seg = triple ? tripleSeg : twinSeg
+        let gutter: CGFloat = triple ? 12 : 16
+        let width = (right - left - gutter * CGFloat(dials.count - 1))
+            / CGFloat(dials.count)
 
         VFD.hairline.withAlphaComponent(0.55).setFill()
-        NSRect(x: left + width + gutter / 2, y: box.minY + 18, width: 1,
-               height: box.height - 32).fill()
+        for index in 1..<dials.count {
+            NSRect(x: left + CGFloat(index) * (width + gutter) - gutter / 2,
+                   y: box.minY + 18, width: 1, height: box.height - 32).fill()
+        }
 
-        for (index, card) in accounts.enumerated() {
+        for (index, card) in dials.enumerated() {
             let x = left + CGFloat(index) * (width + gutter)
             let dim = alpha(card)
             let meter = card.meters.first { $0.name == "5h" }
             let colour = meter.map { VFD.level($0.remaining) } ?? VFD.cyan
 
-            Gauge.label(card.label, at: NSPoint(x: x, y: box.minY + 16), font: capsTiny,
-                        color: VFD.label.withAlphaComponent(0.85 * dim))
+            Gauge.label(Self.heroLabel(card.label), at: NSPoint(x: x, y: box.minY + 16),
+                        font: capsTiny, color: VFD.label.withAlphaComponent(0.85 * dim))
             // The state word always wins the right-hand slot; the plan tier
-            // only shows when there is nothing more urgent to say.
+            // only shows when there is nothing more urgent to say, and only on
+            // a two-dial face — a third of the width is one word wide.
             if let state = stateTag(card) {
                 Gauge.label(state.0, at: NSPoint(x: x + width, y: box.minY + 16),
                             font: capsTiny, color: state.1, alignRight: true)
-            } else if let plan = card.sub {
+            } else if let plan = card.sub, !triple {
                 Gauge.label(plan, at: NSPoint(x: x + width, y: box.minY + 16),
                             font: capsTiny, color: VFD.label.withAlphaComponent(0.55),
                             alignRight: true)
             }
 
             let text = meter.map { String(format: "%3d", $0.remaining) } ?? "---"
-            SevenSegment.draw(text, at: NSPoint(x: x, y: box.minY + 34), metrics: twinSeg,
+            SevenSegment.draw(text, at: NSPoint(x: x, y: box.minY + 34), metrics: seg,
                               lit: colour.withAlphaComponent(dim),
-                              unlit: SevenSegment.ghost(VFD.cyan, metrics: twinSeg))
-            let numeralWidth = SevenSegment.width(text, metrics: twinSeg)
+                              unlit: SevenSegment.ghost(VFD.cyan, metrics: seg))
+            let numeralWidth = SevenSegment.width(text, metrics: seg)
+            let percentSize: CGFloat = triple ? 15 : 20
             NSAttributedString(string: "%", attributes: [
-                .font: NSFont.systemFont(ofSize: 20, weight: .light),
+                .font: NSFont.systemFont(ofSize: percentSize, weight: .light),
                 .foregroundColor: colour.withAlphaComponent(0.9 * dim),
-            ]).draw(at: NSPoint(x: x + numeralWidth + 4, y: box.minY + 60))
+            ]).draw(at: NSPoint(x: x + numeralWidth + 4,
+                                y: box.minY + 34 + seg.height - percentSize - 6))
 
             Gauge.bar(in: NSRect(x: x, y: box.minY + 102, width: width, height: 10),
-                      segments: 12, fraction: Double(meter?.remaining ?? 0) / 100,
+                      segments: triple ? 8 : 12,
+                      fraction: Double(meter?.remaining ?? 0) / 100,
                       lit: colour.withAlphaComponent(dim),
                       unlit: VFD.cyan.withAlphaComponent(0.10), gap: 2.4)
 
-            Gauge.label("reset", at: NSPoint(x: x, y: box.minY + 124), font: capsTiny,
-                        color: VFD.label.withAlphaComponent(0.55 * dim))
+            // A third of the face has no room for the caption beside the
+            // countdown at its longest — "resetting" — and the odometer rows
+            // below already read a bare countdown as a reset time.
+            if !triple {
+                Gauge.label("reset", at: NSPoint(x: x, y: box.minY + 124), font: capsTiny,
+                            color: VFD.label.withAlphaComponent(0.55 * dim))
+            }
             Gauge.label(countdown(meter?.resetsAt) ?? "—",
                         at: NSPoint(x: x + width, y: box.minY + 124), font: capsSmall,
                         color: VFD.label.withAlphaComponent(dim), alignRight: true)
@@ -1653,7 +1696,7 @@ final class ClusterView: ThemeView {
         // A shared rail: all three gauges are 0-100, so three sets of endpoint
         // numbers would be noise.
         let top = box.minY + 30
-        let barHeight: CGFloat = 66
+        let barHeight: CGFloat = 112
         Gauge.label("100", at: NSPoint(x: box.minX + 30, y: top - 4), font: capsTiny,
                     color: VFD.label.withAlphaComponent(0.4 * dim), alignRight: true)
         Gauge.label("0", at: NSPoint(x: box.minX + 30, y: top + barHeight - 8),
@@ -1713,7 +1756,7 @@ final class ClusterView: ThemeView {
 
             for (index, name) in cells.enumerated() {
                 let cx = box.minX + 14 + CGFloat(index % 2) * cellWidth
-                let cy = box.minY + 16 + CGFloat(index / 2) * 42
+                let cy = box.minY + 36 + CGFloat(index / 2) * 68
                 let stat = snapshot.stat("garmin", name)
 
                 Gauge.label(name, at: NSPoint(x: cx, y: cy), font: capsTiny,
@@ -2458,8 +2501,12 @@ final class PanelController: NSObject {
     /// panel's centre — if that is on a screen, it can be seen and grabbed.
     private func discardOffscreenOrigin() {
         guard let x = config.x, let y = config.y else { return }
-        let centre = NSPoint(x: x + window.frame.width / 2, y: y + window.frame.height / 2)
-        if !NSScreen.screens.contains(where: { $0.visibleFrame.contains(centre) }) {
+        // Judged on the whole frame, not its centre. A saved origin outlives
+        // changes to the panel's own height, and growing it pushes the top
+        // edge off screen long before the middle follows — which is exactly
+        // when the position is worth discarding.
+        let frame = NSRect(x: x, y: y, width: window.frame.width, height: window.frame.height)
+        if !NSScreen.screens.contains(where: { $0.visibleFrame.contains(frame) }) {
             clearSavedOrigin()
         }
     }

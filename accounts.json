@@ -1,6 +1,31 @@
 {
   "claude": [
-    { "id": "claude",      "label": "personal", "config_dir": "~/.claude" },
-    { "id": "claude-work", "label": "work",     "config_dir": "~/.claude-enterprise" }
+    {
+      "id": "claude",
+      "label": "personal",
+      "config_dir": "~/.claude"
+    },
+    {
+      "id": "claude-work",
+      "label": "team",
+      "config_dir": "~/.claude-enterprise"
+    },
+    {
+      "id": "claude-personal",
+      "label": "personal",
+      "config_dir": "~/.claude-personal"
+    }
+  ],
+  "codex": [
+    {
+      "id": "codex",
+      "label": "work",
+      "codex_home": "~/.codex"
+    },
+    {
+      "id": "codex-personal",
+      "label": "personal",
+      "codex_home": "~/.codex-personal"
+    }
   ]
 }
