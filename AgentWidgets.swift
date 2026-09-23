@@ -1664,6 +1664,16 @@ final class ClusterView: ThemeView {
                             color: VFD.label.withAlphaComponent(0.85 * dim), alignRight: true)
             }
 
+            // Banked resets sit on the bar's right end, where they are read
+            // against the reading they answer: a spent window with a reset in
+            // hand is not the same as a spent window without one.
+            if let banked = card?.stats.first(where: { $0.label == "resets" })?.value,
+               banked != "0" {
+                Gauge.label("+\(banked) reset", at: NSPoint(x: right, y: top + 20),
+                            font: capsTiny,
+                            color: VFD.amber.withAlphaComponent(0.9 * dim), alignRight: true)
+            }
+
             let text = meter.map { String($0.remaining) } ?? "--"
             SevenSegment.draw(text, at: NSPoint(x: x, y: top + 12), metrics: tinySeg,
                               lit: colour.withAlphaComponent(dim),

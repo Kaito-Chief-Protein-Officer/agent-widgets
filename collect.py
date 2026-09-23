@@ -435,6 +435,14 @@ def fetch_codex(account):
             }
         )
     plan = data.get("plan_type")
+    # Banked resets: each one clears a hit rate limit early. `applicable` is
+    # the count that can be spent on the window actually blocking you, which
+    # is the number worth showing — the total can include resets this plan
+    # cannot apply here.
+    resets = data.get("rate_limit_reset_credits") or {}
+    banked = resets.get("applicable_available_count")
+    if banked is None:
+        banked = resets.get("available_count")
     email = data.get("email") or codex_email(account)
     label = account["label"]
     if email:
@@ -446,6 +454,7 @@ def fetch_codex(account):
         "sub": str(plan) if plan else None,
         "kind": "meters",
         "meters": meters,
+        "stats": ([{"label": "resets", "value": str(banked)}] if banked else []),
         "state": "ok",
     }
 

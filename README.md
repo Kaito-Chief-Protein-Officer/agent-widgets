@@ -249,6 +249,21 @@ week-windows box goes to three odometer rows: numeral left, bar filling the
 rest, bars sharing one left edge so the shapes compare down the column. The
 `CC` lamp and the `LOW` fuel light read the worst of both accounts.
 
+## Banked resets
+
+Codex grants a small number of **rate limit resets** — each clears a hit limit
+early. The count rides in the usage response as
+`rate_limit_reset_credits.applicable_available_count`, and shows on the row as
+`+N RESET` in amber beside the reading it answers: a spent window with a reset
+in hand is not the same as a spent window without one.
+
+`applicable` rather than `available`: the plain count can include resets this
+plan cannot apply to the window actually blocking you.
+
+Claude has no equivalent. Its usage response was checked field by field across
+three accounts — the only credit-shaped things are `extra_usage` and `spend`,
+both disabled here, and neither counts resets.
+
 ## Two OpenAI accounts
 
 Codex works the same way as Claude Code: one login per home directory, keyed by
