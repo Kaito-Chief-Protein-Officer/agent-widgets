@@ -1238,6 +1238,9 @@ final class ClusterView: ThemeView {
         case "stale": return ("stale", VFD.amber)
         case "blocked": return ("limit", VFD.amber)
         case "reauth": return ("auth", VFD.magenta)
+        // The dir is signed in as a different account than it was pinned to,
+        // so the reading shown is the last one that genuinely belonged here.
+        case "mismatch": return ("swapped", VFD.magenta)
         default: return nil
         }
     }

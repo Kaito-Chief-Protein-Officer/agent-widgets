@@ -268,6 +268,24 @@ careless login points two entries at the same account. Account ids are claimed
 per run and a repeat is noted on the card, the same guard the Claude side uses
 on org uuids.
 
+## Pinned identities
+
+Each card is pinned, on its first successful fetch, to the account it saw —
+org uuid for Claude, account id for Codex — in `identity.json`. A later poll
+that finds a *different* account under the same config dir refuses it and
+serves the cached reading for the account that belongs there, tagged
+`swapped`.
+
+This is the only guard that works, because the fetch itself succeeds: `codex
+login` with no `CODEX_HOME` writes `~/.codex` regardless of intent, and a
+Claude login follows whatever session the browser already had. Nothing
+downstream can tell one account's numbers from another's, so without a pin the
+card quietly shows the wrong usage under the right name — which happened twice
+here before this existed.
+
+Deliberately moving an account to a different dir: delete its entry from
+`identity.json` and the next poll re-pins. The file is git-ignored.
+
 Claude has no equivalent. Its usage response was checked field by field across
 three accounts — the only credit-shaped things are `extra_usage` and `spend`,
 both disabled here, and neither counts resets.

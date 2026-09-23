@@ -26,6 +26,7 @@ from datetime import datetime, timedelta, timezone
 CONFIG_DIR = os.path.expanduser("~/.config/agent-widgets")
 CACHE_FILE = os.path.join(CONFIG_DIR, "cache.json")
 LOCK_FILE = os.path.join(CONFIG_DIR, "lock.json")
+IDENTITY_FILE = os.path.join(CONFIG_DIR, "identity.json")
 
 CACHE_TTL = 180  # seconds; matches ccstatusline
 REQUEST_TIMEOUT = 5
@@ -65,6 +66,22 @@ def warn(msg):
 
 
 # --- transport ---------------------------------------------------------------
+
+
+class IdentityMismatch(Exception):
+    """A config dir is signed in as someone other than the account it holds.
+
+    `codex login` with no CODEX_HOME writes ~/.codex whichever account you
+    meant, and a Claude login follows whatever session the browser already
+    had. Either way the fetch succeeds — it just returns a different account —
+    so nothing downstream can tell, and the card would quietly show the wrong
+    numbers under the right name.
+    """
+
+    def __init__(self, expected, found):
+        super().__init__(f"expected {expected}, signed in as {found}")
+        self.expected = expected
+        self.found = found
 
 
 class HttpError(Exception):
@@ -383,6 +400,7 @@ def fetch_claude(account):
     label = account["label"]
     if email:
         label = f"{label} · {email.split('@')[0]}@"
+    check_identity(account["id"], org_uuid)
     note = None
     if org_uuid:
         first = _claimed_orgs.setdefault(org_uuid, account["id"])
@@ -452,8 +470,9 @@ def fetch_codex(account):
     label = account["label"]
     if email:
         label = f"{label} · {email.split('@')[0]}@"
-    note = None
     claimed = data.get("account_id") or account_id
+    check_identity(account["id"], claimed)
+    note = None
     first = _claimed_codex.setdefault(claimed, account["id"])
     if first != account["id"]:
         note = f"same account as {first}"
@@ -473,6 +492,27 @@ def fetch_codex(account):
         ),
         "state": "ok",
     }
+
+
+def check_identity(card_id, found):
+    """Pin a card to the first account seen under it, and hold that pin.
+
+    The pin is recorded on the first successful fetch. After that a different
+    account raises rather than returning, so the runner serves the cached
+    reading for the account that belongs here instead of overwriting it with
+    someone else's. Deliberately moving an account: delete its entry from
+    identity.json and the next poll re-pins.
+    """
+    if not found:
+        return
+    pins = read_json(IDENTITY_FILE) or {}
+    expected = pins.get(card_id)
+    if expected is None:
+        pins[card_id] = found
+        write_json(IDENTITY_FILE, pins)
+        return
+    if expected != found:
+        raise IdentityMismatch(expected, found)
 
 
 # --- active local agents ----------------------------------------------------
@@ -1681,6 +1721,11 @@ def collect(force=False, simulate=None):
                 write_lock(card_id, now + 60, state)
             warn(f"{card_id}: {exc}")
             cards.append(stale_card(cache, card_id, state))
+        except IdentityMismatch as exc:
+            # No lock: this is not transient backoff, and the moment the right
+            # account is signed back in the next poll should clear it.
+            warn(f"{card_id}: {exc}")
+            cards.append(stale_card(cache, card_id, "mismatch"))
         except Exception as exc:  # network down, DNS, JSON garbage
             warn(f"{card_id}: {type(exc).__name__}")
             write_lock(card_id, now + 30, "stale")
