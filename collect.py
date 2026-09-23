@@ -404,6 +404,12 @@ def fetch_claude(account):
     }
 
 
+# Codex account ids already claimed this run. `codex login` with no CODEX_HOME
+# writes to ~/.codex whatever home you meant, so one careless login silently
+# points two entries at the same account and the panel draws it twice.
+_claimed_codex = {}
+
+
 def fetch_codex(account):
     token, account_id = codex_credentials(account)
     if not token or not account_id:
@@ -435,26 +441,36 @@ def fetch_codex(account):
             }
         )
     plan = data.get("plan_type")
-    # Banked resets: each one clears a hit rate limit early. `applicable` is
-    # the count that can be spent on the window actually blocking you, which
-    # is the number worth showing — the total can include resets this plan
-    # cannot apply here.
+    # Banked resets: each one clears a hit rate limit early. Report what is
+    # held, not what is spendable this second — `applicable` drops to 0 while
+    # the window is under its limit, because there is nothing to clear yet,
+    # and showing that as "no resets" loses a credit you still own.
     resets = data.get("rate_limit_reset_credits") or {}
-    banked = resets.get("applicable_available_count")
-    if banked is None:
-        banked = resets.get("available_count")
+    banked = resets.get("available_count") or 0
+    applicable = resets.get("applicable_available_count")
     email = data.get("email") or codex_email(account)
     label = account["label"]
     if email:
         label = f"{label} · {email.split('@')[0]}@"
+    note = None
+    claimed = data.get("account_id") or account_id
+    first = _claimed_codex.setdefault(claimed, account["id"])
+    if first != account["id"]:
+        note = f"same account as {first}"
+        warn(f"{account['id']}: duplicate of {first} ({email or claimed})")
     return {
         "id": account["id"],
         "provider": "codex",
         "label": label,
+        "note": note,
         "sub": str(plan) if plan else None,
         "kind": "meters",
         "meters": meters,
-        "stats": ([{"label": "resets", "value": str(banked)}] if banked else []),
+        "stats": (
+            [{"label": "resets", "value": str(banked)},
+             {"label": "resets_applicable", "value": str(applicable if applicable is not None else banked)}]
+            if banked else []
+        ),
         "state": "ok",
     }
 
@@ -1512,6 +1528,7 @@ def providers():
     """Card order. Claude then Codex accounts, in accounts.json order."""
     _claimed_services.clear()
     _claimed_orgs.clear()
+    _claimed_codex.clear()
     cards = [("agents", fetch_agents)]
     for account in claude_accounts():
         cards.append((account["id"], (lambda acct: lambda: fetch_claude(acct))(account)))

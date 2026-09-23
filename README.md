@@ -257,8 +257,16 @@ early. The count rides in the usage response as
 `+N RESET` in amber beside the reading it answers: a spent window with a reset
 in hand is not the same as a spent window without one.
 
-`applicable` rather than `available`: the plain count can include resets this
-plan cannot apply to the window actually blocking you.
+The badge shows `available_count` — what you hold — and dims when
+`applicable_available_count` is 0. Those diverge whenever the window is under
+its limit: there is nothing to clear yet, so the credit cannot be spent, but it
+is still yours. Reporting only the applicable count made a held reset vanish
+from the panel the moment usage dropped.
+
+A bare `codex login` writes `~/.codex` whichever account you meant, so one
+careless login points two entries at the same account. Account ids are claimed
+per run and a repeat is noted on the card, the same guard the Claude side uses
+on org uuids.
 
 Claude has no equivalent. Its usage response was checked field by field across
 three accounts — the only credit-shaped things are `extra_usage` and `spend`,

@@ -1669,9 +1669,14 @@ final class ClusterView: ThemeView {
             // hand is not the same as a spent window without one.
             if let banked = card?.stats.first(where: { $0.label == "resets" })?.value,
                banked != "0" {
+                // Dimmed when none of them can be spent on this window yet:
+                // the credit is still yours, it just has nothing to clear
+                // until the limit is actually hit.
+                let usable = card?.stats.first { $0.label == "resets_applicable" }?.value != "0"
                 Gauge.label("+\(banked) reset", at: NSPoint(x: right, y: top + 20),
                             font: capsTiny,
-                            color: VFD.amber.withAlphaComponent(0.9 * dim), alignRight: true)
+                            color: VFD.amber.withAlphaComponent((usable ? 0.9 : 0.4) * dim),
+                            alignRight: true)
             }
 
             let text = meter.map { String($0.remaining) } ?? "--"
