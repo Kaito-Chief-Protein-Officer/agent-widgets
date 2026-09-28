@@ -1667,20 +1667,6 @@ final class ClusterView: ThemeView {
                             color: VFD.label.withAlphaComponent(0.85 * dim), alignRight: true)
             }
 
-            // Banked resets sit on the bar's right end, where they are read
-            // against the reading they answer: a spent window with a reset in
-            // hand is not the same as a spent window without one.
-            if let banked = card?.stats.first(where: { $0.label == "resets" })?.value,
-               banked != "0" {
-                // Dimmed when none of them can be spent on this window yet:
-                // the credit is still yours, it just has nothing to clear
-                // until the limit is actually hit.
-                let usable = card?.stats.first { $0.label == "resets_applicable" }?.value != "0"
-                Gauge.label("+\(banked) reset", at: NSPoint(x: right, y: top + 20),
-                            font: capsTiny,
-                            color: VFD.amber.withAlphaComponent((usable ? 0.9 : 0.4) * dim),
-                            alignRight: true)
-            }
 
             let text = meter.map { String($0.remaining) } ?? "--"
             SevenSegment.draw(text, at: NSPoint(x: x, y: top + 12), metrics: tinySeg,
@@ -1690,7 +1676,27 @@ final class ClusterView: ThemeView {
                                           y: top + 23),
                         font: capsTiny, color: colour.withAlphaComponent(0.85 * dim))
 
-            Gauge.bar(in: NSRect(x: barLeft, y: top + 18, width: right - barLeft, height: 9),
+            // Banked resets sit on the bar's right end, read against the
+            // reading they answer: a spent window with a reset in hand is not
+            // the same as one without. The bar gives up the width rather than
+            // running underneath — at 98% it drew straight through the text.
+            var barRight = right
+            if let banked = card?.stats.first(where: { $0.label == "resets" })?.value,
+               banked != "0" {
+                // Dimmed when none can be spent on this window yet: the credit
+                // is still yours, it just has nothing to clear until the limit
+                // is hit.
+                let usable = card?.stats.first { $0.label == "resets_applicable" }?.value != "0"
+                let badge = "+\(banked) reset"
+                let width = NSAttributedString(string: badge.uppercased(),
+                                               attributes: [.font: capsTiny, .kern: 0.9]).size().width
+                Gauge.label(badge, at: NSPoint(x: right, y: top + 20), font: capsTiny,
+                            color: VFD.amber.withAlphaComponent((usable ? 0.9 : 0.4) * dim),
+                            alignRight: true)
+                barRight = right - width - 8
+            }
+
+            Gauge.bar(in: NSRect(x: barLeft, y: top + 18, width: barRight - barLeft, height: 9),
                       segments: 20, fraction: Double(meter?.remaining ?? 0) / 100,
                       lit: colour.withAlphaComponent(dim),
                       unlit: VFD.cyan.withAlphaComponent(0.10), gap: 2.4)
@@ -2036,22 +2042,28 @@ final class ClusterView: ThemeView {
             ?? VFD.cyan
         let netLeft = box.maxX - 14 - netColumn
         let netRight = box.maxX - 14
+        // Free space, not used: the actionable number is how much room is
+        // left, and the percentage only says how alarmed to be about it.
+        let diskUsed = reading("disk")
+        let diskColour: NSColor = diskUsed.map { $0 >= 85 ? VFD.red : ($0 >= 70 ? VFD.amber : VFD.cyan) }
+            ?? VFD.cyan
         let rows: [(String, String?, NSColor)] = [
             ("ping", text("ping").map { "\($0) ms" }, VFD.cyan),
             ("down", text("net_down"), VFD.cyan),
             ("up", text("net_up"), VFD.cyan),
+            ("disk", text("disk_free").map { "\($0) free" }, diskColour),
             ("temp", temp.map { "\($0)°C" }, tempColour),
             ("thermal", thermal.word, thermal.colour),
         ]
         for (index, row) in rows.enumerated() {
-            let y = box.minY + 22 + CGFloat(index) * 23
+            let y = box.minY + 20 + CGFloat(index) * 21
             Gauge.label(row.0, at: NSPoint(x: netLeft, y: y), font: capsTiny,
                         color: VFD.label.withAlphaComponent(0.7 * dim))
             Gauge.label(row.1 ?? "—", at: NSPoint(x: netRight, y: y), font: capsSmall,
                         color: row.2.withAlphaComponent(0.9 * dim), alignRight: true)
             if index < rows.count - 1 {
                 VFD.hairline.withAlphaComponent(0.4 * dim).setFill()
-                NSRect(x: netLeft, y: y + 15, width: netColumn, height: 1).fill()
+                NSRect(x: netLeft, y: y + 14, width: netColumn, height: 1).fill()
             }
         }
     }

@@ -31,6 +31,10 @@ IDENTITY_FILE = os.path.join(CONFIG_DIR, "identity.json")
 CACHE_TTL = 180  # seconds; matches ccstatusline
 REQUEST_TIMEOUT = 5
 DEFAULT_BACKOFF = 300
+# No card stays dark longer than this, whatever the server asks for. A long
+# Retry-After (or a lock written before a fix landed) would otherwise leave a
+# row frozen for the rest of the day with no way back.
+MAX_BACKOFF = 3600
 
 CURL = "/usr/bin/curl"
 USER_AGENT = "codex-cli"
@@ -872,6 +876,31 @@ def compact_rate(value):
     return f"{value / 1024:.0f}K"
 
 
+def disk_usage():
+    """-> (free bytes, total bytes) for the data volume, or (None, None).
+
+    `/System/Volumes/Data` rather than `/`: on APFS the root volume is a
+    sealed ~12GB system snapshot, so reporting it would say 3% used on a
+    disk that is nearly full.
+    """
+    try:
+        out = subprocess.run(["/bin/df", "-k", "/System/Volumes/Data"],
+                             capture_output=True, text=True, timeout=5).stdout
+        fields = out.strip().splitlines()[-1].split()
+        used, avail = int(fields[2]) * 1024, int(fields[3]) * 1024
+    except Exception:
+        return None, None
+    return avail, used + avail
+
+
+def compact_disk(value):
+    if value is None:
+        return None
+    if value >= 1 << 40:
+        return f"{value / (1 << 40):.1f}T"
+    return f"{value / (1 << 30):.0f}G"
+
+
 def fetch_system():
     used, total = memory_usage()
     down, up = net_rates()
@@ -885,6 +914,12 @@ def fetch_system():
     gpu = gpu_percent()
     if gpu is not None:
         stats.append({"label": "gpu", "value": str(gpu)})
+    free, disk_total = disk_usage()
+    if free is not None and disk_total:
+        stats += [
+            {"label": "disk_free", "value": compact_disk(free)},
+            {"label": "disk", "value": str(int(round(100 * (disk_total - free) / disk_total)))},
+        ]
     latency = ping_ms()
     if latency is not None:
         stats.append({"label": "ping", "value": str(latency)})
@@ -1793,6 +1828,7 @@ def read_lock(card_id, now):
 
 
 def write_lock(card_id, blocked_until, state):
+    blocked_until = min(blocked_until, int(time.time()) + MAX_BACKOFF)
     lock = read_json(LOCK_FILE) or {}
     lock[card_id] = {"blocked_until": blocked_until, "state": state}
     write_json(LOCK_FILE, lock)

@@ -168,6 +168,12 @@ utilization counter without `sudo powermetrics`, and a login-launched widget
 should not carry a sudo dependency — the same call that ruled out Wi-Fi link
 rate.
 
+**Disk** is free space on `/System/Volumes/Data`, not `/`. On APFS the root
+volume is a sealed system snapshot of ~12GB, so reporting it would say 3% used
+on a disk that is nearly full. Free rather than used, because how much room is
+left is the actionable number; the percentage only decides the colour (amber
+from 70%, red from 85%).
+
 **Ping** is a single ICMP round trip to `1.1.1.1` — a fixed address rather than
 a hostname, so DNS latency is not folded into a number meant to describe the
 link. It costs ~37ms. Full scale is 200ms: past that the link is unusable and
@@ -290,6 +296,14 @@ Without this the collector reads an expired token off disk, gets a 401, locks
 the card, serves cache, and retries into the same dead token forever. It
 cannot recover on its own, and `claude auth status` will still say
 `loggedIn: true` throughout, because a live refresh token is all it checks.
+
+## Backoff ceiling
+
+A failed card is locked out of retrying for as long as the server asks, capped
+at an hour. Without the cap a long `Retry-After` — or a lock written before a
+fix landed — leaves a row frozen for the rest of the day with no way back, and
+the panel gives no hint that the reading it shows is hours old rather than
+minutes.
 
 ## Pinned identities
 
