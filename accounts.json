@@ -3,7 +3,7 @@
     {
       "id": "claude",
       "label": "personal",
-      "config_dir": "~/.claude"
+      "config_dir": "~/.claude-nakamichi"
     },
     {
       "id": "claude-work",

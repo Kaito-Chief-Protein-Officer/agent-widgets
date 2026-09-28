@@ -268,6 +268,29 @@ careless login points two entries at the same account. Account ids are claimed
 per run and a repeat is noted on the card, the same guard the Claude side uses
 on org uuids.
 
+## Token refresh
+
+Access tokens last hours; refresh tokens last about a month. The collector
+refreshes an access token itself once it is within five minutes of expiry —
+Claude against `api.anthropic.com/v1/oauth/token`, Codex against
+`auth.openai.com/oauth/token` — and writes the result back where the CLI keeps
+it: the keychain entry it came from (`security add-generic-password -U`), or
+`auth.json` via a 0600 temp file and an atomic replace.
+
+**Both providers rotate the refresh token**, so the new one has to be stored:
+the old one stops working the instant the refresh succeeds. Dropping it costs
+a full re-login — which is exactly how `~/.claude` was lost once, by calling
+refresh to identify the endpoint and discarding the response.
+
+Nothing is written unless the response parses and carries both tokens, so a
+failed refresh leaves the stored credential exactly as it was and the card
+falls back to cache.
+
+Without this the collector reads an expired token off disk, gets a 401, locks
+the card, serves cache, and retries into the same dead token forever. It
+cannot recover on its own, and `claude auth status` will still say
+`loggedIn: true` throughout, because a live refresh token is all it checks.
+
 ## Pinned identities
 
 Each card is pinned, on its first successful fetch, to the account it saw —

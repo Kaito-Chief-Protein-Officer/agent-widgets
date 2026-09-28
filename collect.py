@@ -39,6 +39,13 @@ HEADER_MARK = "__agent_widgets_headers__"
 
 ANTHROPIC_URL = "https://api.anthropic.com/api/oauth/usage"
 ANTHROPIC_PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"
+ANTHROPIC_TOKEN_URL = "https://api.anthropic.com/v1/oauth/token"
+ANTHROPIC_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token"
+CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
+# Refresh a little before the deadline: a token that expires mid-poll is the
+# same outage as one that expired an hour ago.
+TOKEN_SKEW = 300
 ANTHROPIC_BETA = "oauth-2025-04-20"
 KEYCHAIN_SERVICE = "Claude Code-credentials"
 # One Claude card per signed-in account. Claude Code keeps one login per
@@ -143,6 +150,24 @@ def get_json(url, headers):
     raise HttpError(status, retry_after)
 
 
+def post_json(url, payload):
+    """POST JSON via the same curl path get_json uses, for the same TLS reason."""
+    proc = subprocess.run(
+        [CURL, "-sS", "--http1.1", "-m", str(REQUEST_TIMEOUT), "-X", "POST", url,
+         "-H", "content-type: application/json", "-d", json.dumps(payload),
+         "-w", f"\n{STATUS_MARK}%{{http_code}}"],
+        capture_output=True, text=True, timeout=REQUEST_TIMEOUT + 5,
+    )
+    out = proc.stdout
+    at = out.rfind(STATUS_MARK)
+    if at < 0:
+        raise HttpError(0)
+    status = int(out[at + len(STATUS_MARK):].strip() or 0)
+    if status != 200:
+        raise HttpError(status)
+    return json.loads(out[:at].rstrip("\n"))
+
+
 def parse_retry_after(value):
     if not value:
         return None
@@ -212,6 +237,9 @@ def keychain_claude_services():
 # Services handed out to non-default accounts during this run, so two of them
 # never read the same entry. Reset by providers().
 _claimed_services = set()
+# Which keychain service each account actually resolved to, so a refresh
+# writes the new token back to the entry it came from.
+_claimed_service_for = {}
 
 
 def claude_keychain_services(account):
@@ -240,6 +268,58 @@ def claude_keychain_services(account):
     return guesses
 
 
+def claude_write_credentials(service, oauth):
+    """Put the refreshed block back where Claude Code will find it.
+
+    `-U` updates in place, keeping the item's account attribute, so the CLI
+    and this collector keep reading the same entry.
+    """
+    account_attr = subprocess.run(
+        ["security", "find-generic-password", "-s", service],
+        capture_output=True, text=True, timeout=10,
+    ).stdout
+    match = re.search(r'"acct"<blob>="([^"]*)"', account_attr)
+    args = ["security", "add-generic-password", "-U", "-s", service, "-w",
+            json.dumps({"claudeAiOauth": oauth})]
+    if match:
+        args += ["-a", match.group(1)]
+    subprocess.run(args, capture_output=True, text=True, timeout=10)
+
+
+def claude_refresh(service, oauth):
+    """-> a refreshed oauth block, or None if the refresh itself failed.
+
+    The response rotates the refresh token, so the new one MUST be stored:
+    the old one is dead the moment this returns, and dropping it costs a full
+    re-login. Everything else in the stored block is preserved.
+    """
+    token = oauth.get("refreshToken")
+    if not token:
+        return None
+    try:
+        data = post_json(ANTHROPIC_TOKEN_URL, {
+            "grant_type": "refresh_token",
+            "refresh_token": token,
+            "client_id": ANTHROPIC_CLIENT_ID,
+        })
+    except Exception as exc:
+        warn(f"refresh {service}: {exc}")
+        return None
+    if not data.get("access_token") or not data.get("refresh_token"):
+        warn(f"refresh {service}: response missing tokens, not writing")
+        return None
+    now = int(time.time() * 1000)
+    fresh = dict(oauth)
+    fresh["accessToken"] = data["access_token"]
+    fresh["refreshToken"] = data["refresh_token"]
+    if data.get("expires_in"):
+        fresh["expiresAt"] = now + int(data["expires_in"]) * 1000
+    if data.get("refresh_token_expires_in"):
+        fresh["refreshTokenExpiresAt"] = now + int(data["refresh_token_expires_in"]) * 1000
+    claude_write_credentials(service, fresh)
+    return fresh
+
+
 def claude_credentials(account):
     """-> the `claudeAiOauth` block for one account, or None."""
     for service in claude_keychain_services(account):
@@ -254,6 +334,7 @@ def claude_credentials(account):
                 oauth = json.loads(proc.stdout.strip()).get("claudeAiOauth") or {}
                 if oauth.get("accessToken"):
                     _claimed_services.add(service)
+                    _claimed_service_for[account["id"]] = service
                     return oauth
         except Exception:
             pass
@@ -303,6 +384,19 @@ def codex_accounts():
     return accounts or [dict(account) for account in DEFAULT_CODEX_ACCOUNTS]
 
 
+def codex_token_expired(account):
+    """True when this home's id_token is past its `exp`. Local read only."""
+    path = os.path.join(os.path.expanduser(account["codex_home"]), "auth.json")
+    try:
+        with open(path) as handle:
+            raw = (json.load(handle).get("tokens") or {}).get("id_token") or ""
+        payload = raw.split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+    except Exception:
+        return True
+    return float(claims.get("exp") or 0) - TOKEN_SKEW <= time.time()
+
+
 def codex_email(account):
     """-> the address in this home's id_token, or None. Local only; the token
     is already on disk and nothing leaves the machine to read it."""
@@ -315,6 +409,47 @@ def codex_email(account):
         return claims.get("email")
     except Exception:
         return None
+
+
+def codex_refresh(account):
+    """Refresh one Codex home in place, preserving the rest of auth.json.
+
+    Same rotation rule as Claude: the returned refresh token replaces the one
+    on disk, because the old one stops working the moment this succeeds.
+    """
+    path = os.path.join(os.path.expanduser(account["codex_home"]), "auth.json")
+    try:
+        with open(path) as handle:
+            stored = json.load(handle)
+    except Exception:
+        return False
+    tokens = stored.get("tokens") or {}
+    if not tokens.get("refresh_token"):
+        return False
+    try:
+        data = post_json(CODEX_TOKEN_URL, {
+            "grant_type": "refresh_token",
+            "refresh_token": tokens["refresh_token"],
+            "client_id": CODEX_CLIENT_ID,
+        })
+    except Exception as exc:
+        warn(f"refresh {account['id']}: {exc}")
+        return False
+    if not data.get("access_token"):
+        warn(f"refresh {account['id']}: response missing tokens, not writing")
+        return False
+    for key, field in (("access_token", "access_token"), ("id_token", "id_token"),
+                       ("refresh_token", "refresh_token")):
+        if data.get(key):
+            tokens[field] = data[key]
+    stored["tokens"] = tokens
+    stored["last_refresh"] = datetime.now(timezone.utc).isoformat()
+    temp = path + ".new"
+    with open(temp, "w") as handle:
+        json.dump(stored, handle)
+    os.chmod(temp, 0o600)
+    os.replace(temp, path)
+    return True
 
 
 def codex_credentials(account):
@@ -376,6 +511,12 @@ def fetch_claude(account):
     oauth = claude_credentials(account)
     if not oauth:
         raise HttpError(401)
+    expires_at = (oauth.get("expiresAt") or 0) / 1000
+    if expires_at and expires_at - TOKEN_SKEW <= time.time():
+        service = _claimed_service_for.get(account["id"])
+        refreshed = claude_refresh(service, oauth) if service else None
+        if refreshed:
+            oauth = refreshed
     data = get_json(
         ANTHROPIC_URL,
         {"Authorization": f"Bearer {oauth['accessToken']}", "anthropic-beta": ANTHROPIC_BETA},
@@ -432,6 +573,8 @@ def fetch_codex(account):
     token, account_id = codex_credentials(account)
     if not token or not account_id:
         raise HttpError(401)
+    if codex_token_expired(account) and codex_refresh(account):
+        token, account_id = codex_credentials(account)
     data = get_json(
         CODEX_URL,
         {"Authorization": f"Bearer {token}", "chatgpt-account-id": account_id},
