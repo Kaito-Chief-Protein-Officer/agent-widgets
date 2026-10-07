@@ -17,6 +17,7 @@ import json
 import os
 import re
 import sqlite3
+import plistlib
 import subprocess
 import sys
 import time
@@ -876,6 +877,86 @@ def compact_rate(value):
     return f"{value / 1024:.0f}K"
 
 
+# ioreg reports some battery fields as unsigned 64-bit, so a discharging
+# current arrives as ~1.8e19 rather than a negative number. Without this the
+# sign of the flow — the one thing that says charging from draining — is lost.
+def _signed64(value):
+    if isinstance(value, int) and value >= 1 << 63:
+        return value - (1 << 64)
+    return value
+
+
+# The gas gauge reports 65535 for a time estimate it cannot make: on AC the
+# time-to-empty is always this, and for the first minutes after plugging in so
+# is time-to-full. It is a sentinel, not eighteen hours.
+BATTERY_UNKNOWN = 65535
+
+
+def battery():
+    """-> dict of battery stats, or {} when there is no battery to read.
+
+    Everything comes from one ioreg read so the percentage, the flow and the
+    time estimate describe the same instant. Sampling them separately would let
+    the panel show a charge power that disagrees with its own direction.
+    """
+    try:
+        raw = subprocess.run(["/usr/sbin/ioreg", "-rc", "AppleSmartBattery", "-a"],
+                             capture_output=True, timeout=5).stdout
+        entries = plistlib.loads(raw)
+    except Exception:
+        return {}
+    if not entries:
+        return {}
+    info = entries[0]
+    data = info.get("BatteryData") or {}
+    adapter = info.get("AdapterDetails") or {}
+
+    percent = info.get("CurrentCapacity")
+    # CurrentCapacity is a percentage only while MaxCapacity reads 100, which
+    # is the Apple Silicon convention. On anything else it is a raw mAh and the
+    # ratio is the only honest reading.
+    if info.get("MaxCapacity") != 100:
+        full = info.get("AppleRawMaxCapacity") or info.get("MaxCapacity")
+        current = info.get("AppleRawCurrentCapacity") or percent
+        percent = round(100 * current / full) if full else None
+    if percent is None:
+        return {}
+
+    stats = {"battery": str(int(percent))}
+
+    volts = info.get("Voltage")
+    amps = _signed64(info.get("Amperage"))
+    if volts and amps is not None:
+        # mV * mA is microwatts. Signed: positive into the battery.
+        stats["battery_watts"] = f"{volts * amps / 1e6:.1f}"
+
+    charging = bool(info.get("IsCharging"))
+    external = bool(info.get("ExternalConnected"))
+    if info.get("FullyCharged"):
+        stats["battery_state"] = "full"
+    elif charging:
+        stats["battery_state"] = "charging"
+    elif external:
+        stats["battery_state"] = "hold"
+    else:
+        stats["battery_state"] = "draining"
+
+    minutes = info.get("AvgTimeToFull") if charging else info.get("AvgTimeToEmpty")
+    if isinstance(minutes, int) and 0 < minutes < BATTERY_UNKNOWN:
+        stats["battery_time"] = f"{minutes // 60}:{minutes % 60:02d}"
+
+    # System draw against what the adapter is rated for. Charge power alone
+    # cannot explain a stalled charge; the load that is eating the adapter can.
+    load = data.get("SystemPower")
+    if isinstance(load, (int, float)):
+        stats["power_load"] = str(int(round(load)))
+    rating = adapter.get("Watts")
+    if external and isinstance(rating, int) and rating > 0:
+        stats["power_adapter"] = str(rating)
+
+    return stats
+
+
 def disk_usage():
     """-> (free bytes, total bytes) for the data volume, or (None, None).
 
@@ -920,6 +1001,8 @@ def fetch_system():
             {"label": "disk_free", "value": compact_disk(free)},
             {"label": "disk", "value": str(int(round(100 * (disk_total - free) / disk_total)))},
         ]
+    for label, value in battery().items():
+        stats.append({"label": label, "value": value})
     latency = ping_ms()
     if latency is not None:
         stats.append({"label": "ping", "value": str(latency)})

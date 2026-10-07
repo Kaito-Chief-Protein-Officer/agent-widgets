@@ -168,6 +168,29 @@ utilization counter without `sudo powermetrics`, and a login-launched widget
 should not carry a sudo dependency — the same call that ruled out Wi-Fi link
 rate.
 
+**Power** is the battery read as a fuel gauge, because it is the one reading
+here that is a tank with a flow into it. Everything comes from a single
+`ioreg -rc AppleSmartBattery` so the charge, the flow and the time estimate
+describe the same instant; sampling them separately lets the panel show a
+charge power that disagrees with its own direction.
+
+The percentage colours the tank, not the state, so a nearly flat battery reads
+red whether or not it happens to be charging. **Flow** is `Voltage × Amperage`,
+signed — positive into the battery. ioreg returns some of these fields as
+unsigned 64-bit, so a discharging current arrives as ~1.8e19 rather than a
+negative number, and `_signed64` is what keeps the one bit that distinguishes
+charging from draining.
+
+**Load** is system draw against the adapter's rating. Charge power alone cannot
+explain a charge that has stalled; the draw eating the adapter can. Over the
+rating the battery is covering the shortfall even with the cable in, so it
+goes red. The rating is dropped on battery, where there is nothing to compare
+against.
+
+The time estimate is the gas gauge's own, and it is volatile — it swung between
+2:49 and 8:21 inside a minute here as load moved. 65535 is its sentinel for an
+estimate it cannot make (always so for time-to-empty on AC), not eighteen hours.
+
 **Disk** is free space on `/System/Volumes/Data`, not `/`. On APFS the root
 volume is a sealed system snapshot of ~12GB, so reporting it would say 3% used
 on a disk that is nearly full. Free rather than used, because how much room is

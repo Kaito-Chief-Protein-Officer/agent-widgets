@@ -1119,7 +1119,7 @@ final class ClusterView: ThemeView {
     override var backdropColor: NSColor { NSColor(srgbRed: 0.02, green: 0.02, blue: 0.024, alpha: 0.97) }
     override var cornerRadius: CGFloat { 8 }
     override var borderColor: NSColor { VFD.hairline.withAlphaComponent(0.5) }
-    override var fittingHeight: CGFloat { 828 }
+    override var fittingHeight: CGFloat { 918 }
 
     private let pad: CGFloat = 12
 
@@ -1184,9 +1184,13 @@ final class ClusterView: ThemeView {
         // Fifth row: the machine the rest of this is running on. Two readings,
         // so they sit side by side rather than taking a column cell each.
         let systemBox = NSRect(x: 12, y: 664, width: 676, height: 150)
+        // Sixth row: the battery is the one reading on this panel that is a
+        // tank with a flow into it, so it gets the shape an instrument cluster
+        // already has for that — a fuel gauge — rather than another dial.
+        let powerBox = NSRect(x: 12, y: 828, width: 676, height: 76)
 
         for box in [heroBox, rampBox, quotaBox, vitalsBox, readBox, agentsBox, mergeBox,
-                    historyBox, localBox, systemBox] {
+                    historyBox, localBox, systemBox, powerBox] {
             Gauge.box(box, color: VFD.hairline.withAlphaComponent(0.85), radius: 4)
         }
 
@@ -1200,6 +1204,7 @@ final class ClusterView: ThemeView {
         drawMergeHistory(snapshot, in: historyBox)
         drawLocalModels(snapshot, in: localBox)
         drawSystem(snapshot, in: systemBox)
+        drawPower(snapshot, in: powerBox)
     }
 
     /// Panel title, sitting on the box's top edge the way a real face does.
@@ -2066,6 +2071,93 @@ final class ClusterView: ThemeView {
                 NSRect(x: netLeft, y: y + 14, width: netColumn, height: 1).fill()
             }
         }
+    }
+
+    /// Battery as a fuel gauge: charge in the tank on the left, and on the
+    /// right the three numbers that say what is happening to it — the flow in
+    /// or out, when it runs out or fills, and whether the adapter can keep up.
+    private func drawPower(_ snapshot: Snapshot, in box: NSRect) {
+        let card = snapshot.card("system")
+        let dim = alpha(card)
+
+        func text(_ name: String) -> String? {
+            card?.stats.first { $0.label == name }?.value
+        }
+        let percent = text("battery").flatMap { Int($0) }
+        let state = text("battery_state") ?? "—"
+        let watts = text("battery_watts").flatMap { Double($0) }
+        let charging = state == "charging"
+
+        title("power", in: box, dim: dim, tag: state,
+              tagColor: charging ? VFD.green : (state == "draining" ? VFD.amber : VFD.label))
+
+        // The tank colour is the charge itself, so a low battery reads red
+        // whether or not it happens to be charging at that moment.
+        let colour = percent.map { VFD.level($0) } ?? VFD.cyan
+
+        let digits = percent.map(String.init) ?? "--"
+        let segX = box.minX + 14
+        SevenSegment.draw(digits, at: NSPoint(x: segX, y: box.minY + 20), metrics: rowSeg,
+                          lit: colour.withAlphaComponent(dim),
+                          unlit: SevenSegment.ghost(VFD.cyan, metrics: rowSeg))
+        Gauge.label("%", at: NSPoint(x: segX + SevenSegment.width(digits, metrics: rowSeg) + 4,
+                                     y: box.minY + 38),
+                    font: capsTiny, color: colour.withAlphaComponent(0.85 * dim))
+
+        // Readouts first: the tank takes whatever width is left, so the
+        // numbers can never be drawn over.
+        let readLeft = box.maxX - 14 - 132
+        let readRight = box.maxX - 14
+        let flowColour: NSColor = charging ? VFD.green : (state == "draining" ? VFD.amber : VFD.label)
+        let flow = watts.map { "\($0 > 0 ? "+" : "")\(Int($0.rounded())) W" }
+
+        let load = text("power_load").flatMap { Int($0) }
+        let rating = text("power_adapter").flatMap { Int($0) }
+        // Load against the adapter's rating, because a charge that has stalled
+        // is explained by the draw, not by the charge power. Over the rating
+        // the battery is covering the shortfall even with the cable in.
+        let loadColour: NSColor
+        if let load, let rating {
+            loadColour = load >= rating ? VFD.red : (load >= rating * 85 / 100 ? VFD.amber : VFD.cyan)
+        } else {
+            loadColour = VFD.cyan
+        }
+        let loadText = load.map { value in
+            rating.map { "\(value) / \($0) W" } ?? "\(value) W" }
+
+        let rows: [(String, String?, NSColor)] = [
+            ("flow", flow, flowColour),
+            (charging ? "to full" : "left", text("battery_time"), VFD.cyan),
+            ("load", loadText, loadColour),
+        ]
+        for (index, row) in rows.enumerated() {
+            let y = box.minY + 16 + CGFloat(index) * 20
+            Gauge.label(row.0, at: NSPoint(x: readLeft, y: y), font: capsTiny,
+                        color: VFD.label.withAlphaComponent(0.7 * dim))
+            Gauge.label(row.1 ?? "—", at: NSPoint(x: readRight, y: y), font: capsSmall,
+                        color: row.2.withAlphaComponent(0.9 * dim), alignRight: true)
+            if index < rows.count - 1 {
+                VFD.hairline.withAlphaComponent(0.4 * dim).setFill()
+                NSRect(x: readLeft, y: y + 13, width: 132, height: 1).fill()
+            }
+        }
+
+        let tankLeft = segX + SevenSegment.width(digits, metrics: rowSeg) + 24
+        let tankRight = readLeft - 22
+        let nub: CGFloat = 5
+        let tank = NSRect(x: tankLeft, y: box.minY + 24, width: tankRight - tankLeft - nub - 2,
+                          height: 26)
+        guard tank.width > 40 else { return }
+        Gauge.box(tank, color: VFD.hairline.withAlphaComponent(0.85 * dim), radius: 3)
+        // The terminal nub: it is what makes an outlined rectangle read as a
+        // battery rather than as one more progress track.
+        VFD.hairline.withAlphaComponent(0.85 * dim).setFill()
+        NSRect(x: tank.maxX + 2, y: tank.midY - 5, width: nub, height: 10).fill()
+
+        Gauge.bar(in: tank.insetBy(dx: 3, dy: 3), segments: 24,
+                  fraction: Double(percent ?? 0) / 100,
+                  lit: colour.withAlphaComponent(0.92 * dim),
+                  unlit: colour.withAlphaComponent(0.10))
     }
 
     /// The wedge tacho: segments growing left to right over a numbered scale,
