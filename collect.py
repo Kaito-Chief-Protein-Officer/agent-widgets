@@ -945,11 +945,18 @@ def battery():
     if isinstance(minutes, int) and 0 < minutes < BATTERY_UNKNOWN:
         stats["battery_time"] = f"{minutes // 60}:{minutes % 60:02d}"
 
-    # System draw against what the adapter is rated for. Charge power alone
-    # cannot explain a stalled charge; the load that is eating the adapter can.
     load = data.get("SystemPower")
     if isinstance(load, (int, float)):
         stats["power_load"] = str(int(round(load)))
+
+    # What the adapter is actually delivering, which is the system draw plus
+    # the charge current plus conversion loss — not the system draw alone. At
+    # 29% charge this machine drew 64W while the adapter supplied 135W of its
+    # 140W, so the system figure on its own says there is headroom when there
+    # is none, and headroom is the whole question this row answers.
+    supply = data.get("AdapterPower")
+    if external and isinstance(supply, (int, float)):
+        stats["power_supply"] = str(int(round(supply)))
     rating = adapter.get("Watts")
     if external and isinstance(rating, int) and rating > 0:
         stats["power_adapter"] = str(rating)

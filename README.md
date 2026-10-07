@@ -181,11 +181,17 @@ unsigned 64-bit, so a discharging current arrives as ~1.8e19 rather than a
 negative number, and `_signed64` is what keeps the one bit that distinguishes
 charging from draining.
 
-**Load** is system draw against the adapter's rating. Charge power alone cannot
-explain a charge that has stalled; the draw eating the adapter can. Over the
-rating the battery is covering the shortfall even with the cable in, so it
-goes red. The rating is dropped on battery, where there is nothing to compare
-against.
+**Load** is system draw and **adapter** is what the wall is actually
+delivering, which is the load plus the charge current plus conversion loss.
+These are deliberately not the same number: at 31% charge this machine drew
+89W while the adapter supplied 135W of its 140W, so the system figure alone
+claims headroom that is not there — and headroom is the whole question the row
+answers. Only the adapter figure is coloured against the rating. It is dropped
+on battery, where there is nothing to compare against.
+
+The two pairs are columns rather than one list because the flow into the pack
+and the draw out of the adapter are different quantities; stacking them would
+invite reading them as one.
 
 The time estimate is the gas gauge's own, and it is volatile — it swung between
 2:49 and 8:21 inside a minute here as load moved. 65535 is its sentinel for an

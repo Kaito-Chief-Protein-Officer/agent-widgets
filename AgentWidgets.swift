@@ -2106,44 +2106,55 @@ final class ClusterView: ThemeView {
 
         // Readouts first: the tank takes whatever width is left, so the
         // numbers can never be drawn over.
-        let readLeft = box.maxX - 14 - 132
-        let readRight = box.maxX - 14
+        let column: CGFloat = 132
+        let supplyLeft = box.maxX - 14 - column
+        let batteryLeft = supplyLeft - 22 - column
         let flowColour: NSColor = charging ? VFD.green : (state == "draining" ? VFD.amber : VFD.label)
         let flow = watts.map { "\($0 > 0 ? "+" : "")\(Int($0.rounded())) W" }
 
         let load = text("power_load").flatMap { Int($0) }
+        let supply = text("power_supply").flatMap { Int($0) }
         let rating = text("power_adapter").flatMap { Int($0) }
-        // Load against the adapter's rating, because a charge that has stalled
-        // is explained by the draw, not by the charge power. Over the rating
-        // the battery is covering the shortfall even with the cable in.
-        let loadColour: NSColor
-        if let load, let rating {
-            loadColour = load >= rating ? VFD.red : (load >= rating * 85 / 100 ? VFD.amber : VFD.cyan)
+        // Against the rating, this is the adapter's delivery and not the system
+        // draw: charging takes its own current on top, so the system figure
+        // alone claims headroom that is not there. At 31% this machine drew
+        // 89W while the adapter was supplying 135W of 140W.
+        let supplyColour: NSColor
+        if let supply, let rating {
+            supplyColour = supply >= rating ? VFD.red
+                : (supply >= rating * 85 / 100 ? VFD.amber : VFD.cyan)
         } else {
-            loadColour = VFD.cyan
+            supplyColour = VFD.cyan
         }
-        let loadText = load.map { value in
+        let supplyText = supply.map { value in
             rating.map { "\(value) / \($0) W" } ?? "\(value) W" }
 
-        let rows: [(String, String?, NSColor)] = [
-            ("flow", flow, flowColour),
-            (charging ? "to full" : "left", text("battery_time"), VFD.cyan),
-            ("load", loadText, loadColour),
+        // Two pairs, each read together: what the pack is doing, then what the
+        // wall is doing. Splitting them across one column would put the flow
+        // into the battery next to the draw out of the adapter as if they were
+        // the same quantity.
+        let columns: [(CGFloat, [(String, String?, NSColor)])] = [
+            (batteryLeft, [("flow", flow, flowColour),
+                           (charging ? "to full" : "left", text("battery_time"), VFD.cyan)]),
+            (supplyLeft, [("load", load.map { "\($0) W" }, VFD.cyan),
+                          ("adapter", supplyText, supplyColour)]),
         ]
-        for (index, row) in rows.enumerated() {
-            let y = box.minY + 16 + CGFloat(index) * 20
-            Gauge.label(row.0, at: NSPoint(x: readLeft, y: y), font: capsTiny,
-                        color: VFD.label.withAlphaComponent(0.7 * dim))
-            Gauge.label(row.1 ?? "—", at: NSPoint(x: readRight, y: y), font: capsSmall,
-                        color: row.2.withAlphaComponent(0.9 * dim), alignRight: true)
-            if index < rows.count - 1 {
-                VFD.hairline.withAlphaComponent(0.4 * dim).setFill()
-                NSRect(x: readLeft, y: y + 13, width: 132, height: 1).fill()
+        for (left, rows) in columns {
+            for (index, row) in rows.enumerated() {
+                let y = box.minY + 20 + CGFloat(index) * 24
+                Gauge.label(row.0, at: NSPoint(x: left, y: y), font: capsTiny,
+                            color: VFD.label.withAlphaComponent(0.7 * dim))
+                Gauge.label(row.1 ?? "—", at: NSPoint(x: left + column, y: y), font: capsSmall,
+                            color: row.2.withAlphaComponent(0.9 * dim), alignRight: true)
+                if index < rows.count - 1 {
+                    VFD.hairline.withAlphaComponent(0.4 * dim).setFill()
+                    NSRect(x: left, y: y + 15, width: column, height: 1).fill()
+                }
             }
         }
 
         let tankLeft = segX + SevenSegment.width(digits, metrics: rowSeg) + 24
-        let tankRight = readLeft - 22
+        let tankRight = batteryLeft - 22
         let nub: CGFloat = 5
         let tank = NSRect(x: tankLeft, y: box.minY + 24, width: tankRight - tankLeft - nub - 2,
                           height: 26)
