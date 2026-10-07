@@ -168,6 +168,28 @@ utilization counter without `sudo powermetrics`, and a login-launched widget
 should not carry a sudo dependency — the same call that ruled out Wi-Fi link
 rate.
 
+**Docker** is the eight self-hosted CI runners this machine hosts, one column
+per job slot. They are here rather than in a separate tool because they compete
+with everything above them for the same cores and memory.
+
+The bar is the runner's memory against *its own* cap, not the host's. A runner
+is capped well below the machine — 4GiB against 128 — so it hits its ceiling
+long before the host does, and the RAM gauge in the SYSTEM row says nothing
+about it. One of these sat at 100% of its cap while the host read 58%.
+
+The lamp and the bar answer different questions. The lamp is `Runner.Worker`
+in `docker top`: a runner always has a Listener, and only has a Worker while
+it is executing a job. The bar is memory, which an idle runner can still be
+holding from the job before. `docker top` is used rather than `docker exec`
+because it reads this without entering the container, which keeps all eight
+under a quarter of a second; the one `docker stats` call costs about two, and
+issuing it per container would multiply that by eight.
+
+A daemon that is not running reports nothing rather than an error. Docker being
+down is the normal state on a machine that is not running CI, so an empty card
+reads as "not running here", which is true, where a red one would read as a
+fault.
+
 **Power** is the battery read as a fuel gauge, because it is the one reading
 here that is a tank with a flow into it. Everything comes from a single
 `ioreg -rc AppleSmartBattery` so the charge, the flow and the time estimate

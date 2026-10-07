@@ -1119,7 +1119,7 @@ final class ClusterView: ThemeView {
     override var backdropColor: NSColor { NSColor(srgbRed: 0.02, green: 0.02, blue: 0.024, alpha: 0.97) }
     override var cornerRadius: CGFloat { 8 }
     override var borderColor: NSColor { VFD.hairline.withAlphaComponent(0.5) }
-    override var fittingHeight: CGFloat { 918 }
+    override var fittingHeight: CGFloat { 1016 }
 
     private let pad: CGFloat = 12
 
@@ -1188,9 +1188,13 @@ final class ClusterView: ThemeView {
         // tank with a flow into it, so it gets the shape an instrument cluster
         // already has for that — a fuel gauge — rather than another dial.
         let powerBox = NSRect(x: 12, y: 828, width: 676, height: 76)
+        // Seventh row: the CI runners this machine hosts. Eight job slots that
+        // compete with everything above them for the same cores and memory,
+        // so they belong on the same face as the cores and memory.
+        let dockerBox = NSRect(x: 12, y: 918, width: 676, height: 84)
 
         for box in [heroBox, rampBox, quotaBox, vitalsBox, readBox, agentsBox, mergeBox,
-                    historyBox, localBox, systemBox, powerBox] {
+                    historyBox, localBox, systemBox, powerBox, dockerBox] {
             Gauge.box(box, color: VFD.hairline.withAlphaComponent(0.85), radius: 4)
         }
 
@@ -1205,6 +1209,7 @@ final class ClusterView: ThemeView {
         drawLocalModels(snapshot, in: localBox)
         drawSystem(snapshot, in: systemBox)
         drawPower(snapshot, in: powerBox)
+        drawDocker(snapshot, in: dockerBox)
     }
 
     /// Panel title, sitting on the box's top edge the way a real face does.
@@ -2169,6 +2174,89 @@ final class ClusterView: ThemeView {
                   fraction: Double(percent ?? 0) / 100,
                   lit: colour.withAlphaComponent(0.92 * dim),
                   unlit: colour.withAlphaComponent(0.10))
+    }
+
+    /// The CI runners: one column per job slot, its memory against that
+    /// slot's own cap. Memory is the reading that matters here — a runner is
+    /// capped well below the machine, so it reaches its ceiling long before
+    /// the host does, and the host's RAM gauge above says nothing about it.
+    private func drawDocker(_ snapshot: Snapshot, in box: NSRect) {
+        let card = snapshot.card("system")
+        let dim = alpha(card)
+
+        func text(_ name: String) -> String? {
+            card?.stats.first { $0.label == name }?.value
+        }
+
+        // "memory:busy" per runner, in slot order.
+        let slots: [(Int, Bool)] = (text("docker_runners") ?? "")
+            .split(separator: ",")
+            .map { entry -> (Int, Bool) in
+                let parts = entry.split(separator: ":")
+                return (parts.first.flatMap { Int($0) } ?? 0, parts.count > 1 && parts[1] == "1")
+            }
+
+        let busy = text("docker_busy")
+        let total = text("docker_total")
+        guard !slots.isEmpty else {
+            title("docker", in: box, dim: dim, tag: "idle")
+            Gauge.label("no daemon", at: NSPoint(x: box.minX + 14, y: box.minY + 30),
+                        font: capsSmall, color: VFD.label.withAlphaComponent(0.6 * dim))
+            return
+        }
+        title("docker", in: box, dim: dim,
+              tag: busy.flatMap { b in total.map { "\(b) of \($0) busy" } } ?? "runners")
+
+        let column: CGFloat = 132
+        let readLeft = box.maxX - 14 - column
+        let peak = text("docker_mem").flatMap { Int($0) }
+        // Against the slot cap, not the host: a runner at its ceiling is
+        // killed whatever the machine has spare.
+        let peakColour: NSColor = peak.map { $0 >= 90 ? VFD.red : ($0 >= 75 ? VFD.amber : VFD.cyan) }
+            ?? VFD.cyan
+        let rows: [(String, String?, NSColor)] = [
+            ("busy", busy.flatMap { b in total.map { "\(b) / \($0)" } }, VFD.cyan),
+            ("peak mem", peak.map { "\($0)%" }, peakColour),
+            ("services", text("docker_services").map { count in
+                text("docker_unhealthy").map { "\(count), \($0) sick" } ?? count }, 
+             text("docker_unhealthy") == nil ? VFD.cyan : VFD.amber),
+        ]
+        for (index, row) in rows.enumerated() {
+            let y = box.minY + 14 + CGFloat(index) * 22
+            Gauge.label(row.0, at: NSPoint(x: readLeft, y: y), font: capsTiny,
+                        color: VFD.label.withAlphaComponent(0.7 * dim))
+            Gauge.label(row.1 ?? "—", at: NSPoint(x: readLeft + column, y: y), font: capsSmall,
+                        color: row.2.withAlphaComponent(0.9 * dim), alignRight: true)
+            if index < rows.count - 1 {
+                VFD.hairline.withAlphaComponent(0.4 * dim).setFill()
+                NSRect(x: readLeft, y: y + 14, width: column, height: 1).fill()
+            }
+        }
+
+        let left = box.minX + 14
+        let span = readLeft - 22 - left
+        let pitch = span / CGFloat(slots.count)
+        let barWidth = min(26, pitch - 10)
+        for (index, slot) in slots.enumerated() {
+            let centre = left + pitch * (CGFloat(index) + 0.5)
+            let (memory, running) = slot
+
+            // The lamp says whether the slot is executing a job; the bar says
+            // how close it is to its cap. They are different questions — an
+            // idle runner can still be holding memory from the job before.
+            let lamp = NSRect(x: centre - 3, y: box.minY + 12, width: 6, height: 6)
+            (running ? VFD.green : VFD.label).withAlphaComponent((running ? 0.95 : 0.25) * dim).setFill()
+            NSBezierPath(ovalIn: lamp).fill()
+
+            let bar = NSRect(x: centre - barWidth / 2, y: box.minY + 24, width: barWidth, height: 34)
+            let colour = VFD.level(100 - memory)
+            Gauge.bar(in: bar, segments: 7, fraction: Double(memory) / 100,
+                      lit: colour.withAlphaComponent(0.92 * dim),
+                      unlit: colour.withAlphaComponent(0.10), vertical: true)
+
+            Gauge.label("\(index + 1)", at: NSPoint(x: centre, y: box.minY + 62),
+                        font: capsTiny, color: VFD.label.withAlphaComponent(0.6 * dim))
+        }
     }
 
     /// The wedge tacho: segments growing left to right over a numbered scale,

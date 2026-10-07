@@ -964,6 +964,85 @@ def battery():
     return stats
 
 
+DOCKER = "/opt/homebrew/bin/docker"
+# The self-hosted CI runners are the containers worth watching; everything else
+# on this daemon is a service that is either up or it is not.
+RUNNER_PREFIX = "boringstack-runner-"
+
+
+def _docker(args, timeout):
+    try:
+        done = subprocess.run([DOCKER] + args, capture_output=True, text=True,
+                              timeout=timeout)
+    except Exception:
+        return None
+    return done.stdout if done.returncode == 0 else None
+
+
+def docker_status():
+    """-> dict of container stats, or {} when there is no reachable daemon.
+
+    Docker being down is the normal state on a machine that is not running CI,
+    so it reports nothing rather than an error — an empty card reads as "not
+    running here", which is true, where a red one would read as a fault.
+    """
+    listing = _docker(["ps", "--format", "{{.Names}}\t{{.State}}\t{{.Status}}"], 10)
+    if listing is None:
+        return {}
+
+    runners, services, unhealthy = [], 0, 0
+    for line in listing.strip().splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        name, _, status = parts[0], parts[1], parts[2]
+        if "(unhealthy)" in status:
+            unhealthy += 1
+        # The buildkit and cache containers carry the runner prefix but are
+        # shared infrastructure, not job slots: a digit suffix is what marks
+        # an actual runner.
+        suffix = name.rsplit("-", 1)[-1]
+        if name.startswith(RUNNER_PREFIX) and suffix.isdigit():
+            runners.append((int(suffix), name))
+        else:
+            services += 1
+    runners.sort()
+
+    stats = {"docker_services": str(services)}
+    if unhealthy:
+        stats["docker_unhealthy"] = str(unhealthy)
+    if not runners:
+        return stats
+
+    # One stats call for every container: it costs about two seconds, and
+    # issuing it per container would multiply that by the runner count.
+    memory = {}
+    usage = _docker(["stats", "--no-stream", "--format", "{{.Name}}\t{{.MemPerc}}"], 30)
+    for line in (usage or "").strip().splitlines():
+        name, _, percent = line.partition("\t")
+        try:
+            memory[name] = int(round(float(percent.strip().rstrip("%"))))
+        except ValueError:
+            continue
+
+    # A runner always has a Listener; it only has a Worker while it is
+    # executing a job. `docker top` reads this without exec'ing into the
+    # container, which keeps all eight under a quarter of a second.
+    busy, fills = 0, []
+    for _, name in runners:
+        processes = _docker(["top", name], 5) or ""
+        running = "Runner.Worker" in processes
+        busy += 1 if running else 0
+        fills.append(f"{memory.get(name, 0)}:{1 if running else 0}")
+
+    stats["docker_runners"] = ",".join(fills)
+    stats["docker_busy"] = str(busy)
+    stats["docker_total"] = str(len(runners))
+    peak = max((memory.get(name, 0) for _, name in runners), default=0)
+    stats["docker_mem"] = str(peak)
+    return stats
+
+
 def disk_usage():
     """-> (free bytes, total bytes) for the data volume, or (None, None).
 
@@ -1008,6 +1087,8 @@ def fetch_system():
             {"label": "disk_free", "value": compact_disk(free)},
             {"label": "disk", "value": str(int(round(100 * (disk_total - free) / disk_total)))},
         ]
+    for label, value in docker_status().items():
+        stats.append({"label": label, "value": value})
     for label, value in battery().items():
         stats.append({"label": label, "value": value})
     latency = ping_ms()
